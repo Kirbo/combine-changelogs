@@ -4,7 +4,7 @@ stages:
   - release
 
 variables:
-  BINARY_NAME: gitlab-changelog
+  BINARY_NAME: combine-changelogs
 
 # Runs on every push to the default branch.
 # Analyzes conventional commits, determines the next semantic version,

@@ -1,8 +1,8 @@
 #!/usr/bin/env sh
-# install.sh — download and install gitlab-changelog
+# install.sh — download and install combine-changelogs
 #
 # Usage:
-#   curl -fsSL https://gitlab.com/kirbo/generate-changelog-from-gitlab-releases/-/raw/main/install.sh | sh
+#   curl -fsSL https://gitlab.com/kirbo/combine-changelogs/-/raw/main/install.sh | sh
 #
 # Install a specific version:
 #   curl -fsSL ...install.sh | sh -s -- v1.2.0
@@ -13,8 +13,8 @@
 
 set -e
 
-BINARY_NAME="gitlab-changelog"
-REPO="kirbo/generate-changelog-from-gitlab-releases"
+BINARY_NAME="combine-changelogs"
+REPO="kirbo/combine-changelogs"
 GITLAB_URL="https://gitlab.com"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 
