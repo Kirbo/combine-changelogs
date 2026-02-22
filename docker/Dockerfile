@@ -10,33 +10,25 @@
 #   -t kirbownz/combine-changelogs:$(git describe --tags --always) \
 #   --push \
 #   -f docker/Dockerfile .
-
-# Check the base images from: https://hub.docker.com/hardened-images/catalog/dhi/alpine-base/images
+#
+# Usage:
+#   docker run --rm -v $(pwd):/work -w /work kirbownz/combine-changelogs:latest \
+#     combine-changelogs -project "mygroup/myrepo"
 
 # Define build arguments
 ARG ALPINE_VERSION=3.23
 ARG VERSION
 ARG BUILD_DATE
 ARG VCS_REF
-
-################## Create the build image
-FROM dhi.io/alpine-base:${ALPINE_VERSION}-dev AS builder
-
-ARG VERSION
-
-# Install curl for downloading the binary
-RUN apk add --no-cache curl
-
-# Download and install combine-changelogs
-# VERSION is empty → installs the latest release; set VERSION=vX.Y.Z to pin a specific one
-RUN VERSION="${VERSION}" curl -fsSL https://gitlab.com/kirbo/combine-changelogs/-/raw/main/install.sh | sh
+ARG TARGETARCH
 
 ################## Create the runtime image
-FROM dhi.io/alpine:${ALPINE_VERSION} AS runner
+FROM alpine:${ALPINE_VERSION} AS runner
 
 ARG VERSION
 ARG BUILD_DATE
 ARG VCS_REF
+ARG TARGETARCH
 
 # OCI Image Format Specification labels (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
 LABEL org.opencontainers.image.title="combine-changelogs"
@@ -54,7 +46,6 @@ LABEL org.opencontainers.image.licenses="MIT"
 LABEL maintainer="Kimmo Saari <kirbo@kirbo-designs.com>"
 LABEL description="Combines GitLab releases and changelog files into a single CHANGELOG.md"
 
-# Copy the statically-linked binary from the builder stage
-COPY --from=builder /usr/local/bin/combine-changelogs /usr/local/bin/combine-changelogs
-
-ENTRYPOINT ["combine-changelogs"]
+# Copy the pre-built binary from CI/CD artifacts.
+# Owned by root, executable by all — users can run but not modify it.
+COPY --chmod=755 combine-changelogs-linux-${TARGETARCH} /usr/local/bin/combine-changelogs

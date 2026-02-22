@@ -1,8 +1,8 @@
 stages:
-  - semantic-release
+  - init
   - build
-  - release
   - docker
+  - release
 
 workflow:
   rules:
@@ -24,6 +24,8 @@ variables:
   DOCKERHUB_REPOSITORY: "kirbownz/${BINARY_NAME}"
   IMAGE_NAME: ${DOCKERHUB_REPOSITORY}
   BINARY_NAME: combine-changelogs
+  GIT_DEPTH: "0"  # Tells git to fetch all the branches of the project, required by the analysis task
+  GIT_STRATEGY: clone
 
 # Default configuration for all jobs
 default:
@@ -32,38 +34,31 @@ default:
   tags:
     - macos
 
-# Runs on every push to the default branch.
-# Analyzes conventional commits, determines the next semantic version,
-# generates a changelog, and creates a GitLab release + tag.
-#
-# Requires a GITLAB_TOKEN CI/CD variable (Settings → CI/CD → Variables)
-# with `api` scope — CI_JOB_TOKEN does not have permission to push tags.
-semantic-release:
-  stage: semantic-release
+bump version:
+  stage: init
   image:
     name: registry.gitlab.com/go-semantic-release/semantic-release:latest
     entrypoint: [""]
+  interruptible: true
   rules:
     - if: '$CI_COMMIT_TAG == null'
+  cache: []
   artifacts:
     paths:
-      - .version
+      - .version-unreleased
       - build.env
       - CHANGELOG.md
     expire_in: never
   before_script:
-    - apk add --no-cache curl jq
+    - git config --global --add safe.directory "$CI_PROJECT_DIR"
+    - git remote set-url origin "$CI_REPOSITORY_URL" || echo 'Not a git repository; skipping'
+    - git fetch --tags --force || true
+    - git fetch origin "$CI_DEFAULT_BRANCH" || true
   script:
-    - semantic-release --provider gitlab --provider-opt "gitlab_baseurl=${CI_SERVER_URL}" --allow-no-changes --version-file --changelog CHANGELOG.md
-    # If no new release was created, fall back to the latest existing GitLab release.
-    - |
-      if [ ! -f .version ] || [ ! -f CHANGELOG.md ]; then
-        LATEST=$(curl -sf --header "JOB-TOKEN: ${CI_JOB_TOKEN}" "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/releases?per_page=1")
-        [ ! -f .version ]      && echo "${LATEST}" | jq -r '.[0].tag_name // "0.0.0" | ltrimstr("v")' > .version
-        [ ! -f CHANGELOG.md ]  && echo "${LATEST}" | jq -r '.[0].description // ""'                   > CHANGELOG.md
-      fi
-    - export VERSION=$(cat .version)
+    - semantic-release --version-file --changelog CHANGELOG.md --dry
+    - export VERSION=$(cat .version-unreleased)
     - echo "VERSION=${VERSION}" > build.env
+    - echo "sonar.projectVersion=${VERSION}" >> sonar-project.properties
     - cat CHANGELOG.md
 
 # Reusable build template — cross-compiles for Linux.
@@ -91,40 +86,6 @@ build:arm64:
   variables:
     GOARCH: arm64
 
-# Uploads the compiled binaries to the Generic Packages Registry and attaches
-# them as downloadable assets to the release that go-semantic-release created.
-upload-binaries:
-  stage: release
-  image: alpine:latest
-  needs:
-    - job: build:amd64
-      artifacts: true
-    - job: build:arm64
-      artifacts: true
-  rules:
-    - if: '$CI_COMMIT_TAG == null'
-  before_script:
-    - apk add --no-cache curl
-  script:
-    - |
-      for GOARCH in amd64 arm64; do
-        DOWNLOAD_URL="${CI_PROJECT_URL}/-/packages/generic/${BINARY_NAME}/${CI_COMMIT_TAG}/${BINARY_NAME}-linux-${GOARCH}"
-
-        # Upload binary to the Generic Packages Registry
-        curl --fail --show-error \
-          --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
-          --upload-file "${BINARY_NAME}-linux-${GOARCH}" \
-          "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${BINARY_NAME}/${CI_COMMIT_TAG}/${BINARY_NAME}-linux-${GOARCH}"
-
-        # Attach the uploaded file as an asset link on the existing release
-        curl --fail --show-error \
-          --request POST \
-          --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
-          --header "Content-Type: application/json" \
-          --data "{\"name\":\"${BINARY_NAME}-linux-${GOARCH}\",\"url\":\"${DOWNLOAD_URL}\",\"link_type\":\"package\"}" \
-          "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/releases/${CI_COMMIT_TAG}/assets/links"
-      done
-
 # Builds multi-platform Docker images (amd64 + arm64) and pushes them to Docker Hub.
 # Runs after upload-binaries so the binaries are available in the packages registry
 # for the install script to download during the Docker build.
@@ -136,17 +97,18 @@ build-and-push-docker:
   variables:
     DOCKER_HOST: "unix:///var/run/docker.sock"
   needs:
-    - job: semantic-release
+    - job: bump version
       artifacts: true
-    - job: upload-binaries
-      artifacts: false
+    - job: build:amd64
+      artifacts: true
+    - job: build:arm64
+      artifacts: true
   rules:
     - if: '$CI_COMMIT_TAG == null'
   before_script:
     - export BUILDER_NAME="${DOCKER_BUILDER_NAME:-shared-ci-builder}"
     - docker buildx inspect "${BUILDER_NAME}" >/dev/null 2>&1 || docker buildx create --name "${BUILDER_NAME}" --driver docker-container --use
     - echo "${DOCKERHUB_PASSWORD}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin "${DOCKERHUB_REGISTRY}"
-    - echo "${DOCKERHUB_PASSWORD_READ}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin dhi.io
   script:
     - source build.env
     - |
@@ -162,3 +124,59 @@ build-and-push-docker:
         -t ${DOCKERHUB_REGISTRY}/${DOCKERHUB_REPOSITORY}:${VERSION} \
         --push \
         -f docker/Dockerfile .
+
+
+# Runs on every push to the default branch.
+# Analyzes conventional commits, determines the next semantic version,
+# generates a changelog, and creates a GitLab release + tag.
+#
+# Requires a GITLAB_TOKEN CI/CD variable (Settings → CI/CD → Variables)
+# with `api` scope — CI_JOB_TOKEN does not have permission to push tags.
+semantic-release:
+  stage: release
+  image:
+    name: registry.gitlab.com/go-semantic-release/semantic-release:latest
+    entrypoint: [""]
+  rules:
+    - if: '$CI_COMMIT_TAG == null'
+  script:
+    - semantic-release --provider gitlab --provider-opt "gitlab_baseurl=${CI_SERVER_URL}"
+
+
+# Uploads the compiled binaries to the Generic Packages Registry and attaches
+# them as downloadable assets to the release that go-semantic-release created.
+upload-binaries:
+  stage: release
+  image: alpine:latest
+  needs:
+    - job: semantic-release
+    - job: bump version
+      artifacts: true
+    - job: build:amd64
+      artifacts: true
+    - job: build:arm64
+      artifacts: true
+  rules:
+    - if: '$CI_COMMIT_TAG == null'
+  before_script:
+    - apk add --no-cache curl
+    - source build.env
+  script:
+    - |
+      for GOARCH in amd64 arm64; do
+        DOWNLOAD_URL="${CI_PROJECT_URL}/-/packages/generic/${BINARY_NAME}/${VERSION}/${BINARY_NAME}-linux-${GOARCH}"
+
+        # Upload binary to the Generic Packages Registry
+        curl --fail --show-error \
+          --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+          --upload-file "${BINARY_NAME}-linux-${GOARCH}" \
+          "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${BINARY_NAME}/${VERSION}/${BINARY_NAME}-linux-${GOARCH}"
+
+        # Attach the uploaded file as an asset link on the existing release
+        curl --fail --show-error \
+          --request POST \
+          --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+          --header "Content-Type: application/json" \
+          --data "{\"name\":\"${BINARY_NAME}-linux-${GOARCH}\",\"url\":\"${DOWNLOAD_URL}\",\"link_type\":\"package\"}" \
+          "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/releases/v${VERSION}/assets/links"
+      done

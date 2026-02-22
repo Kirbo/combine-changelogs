@@ -25,6 +25,35 @@ VERSION=v1.2.0 curl -fsSL https://gitlab.com/kirbo/combine-changelogs/-/raw/main
 INSTALL_DIR=~/.local/bin curl -fsSL https://gitlab.com/kirbo/combine-changelogs/-/raw/main/install.sh | sh
 ```
 
+### Docker
+
+```bash
+docker pull kirbownz/combine-changelogs:latest
+```
+
+Run it against a project (mounts the current directory so the output `CHANGELOG.md` lands on the host):
+
+```bash
+# Public project
+docker run --rm -v $(pwd):/work -w /work \
+  kirbownz/combine-changelogs:latest \
+  combine-changelogs -project "mygroup/myrepo"
+
+# Private project
+docker run --rm \
+  -e GITLAB_TOKEN="glpat-xxxxxxxxxxxx" \
+  -v $(pwd):/work -w /work \
+  kirbownz/combine-changelogs:latest \
+  combine-changelogs -project "mygroup/myrepo"
+
+# Self-hosted GitLab instance
+docker run --rm \
+  -e GITLAB_TOKEN="glpat-xxxxxxxxxxxx" \
+  -v $(pwd):/work -w /work \
+  kirbownz/combine-changelogs:latest \
+  combine-changelogs -url "https://gitlab.example.com" -project "mygroup/myrepo"
+```
+
 ### From source
 
 ```bash
@@ -134,7 +163,31 @@ combine-changelogs -project "mygroup/myrepo" \
 
 ### Inside a GitLab CI pipeline
 
-Download the pre-built binary for the runner's architecture, then run it. GitLab automatically provides `CI_JOB_TOKEN`, `CI_PROJECT_PATH`, and `CI_SERVER_URL`, so no flags are needed for the current project.
+GitLab automatically provides `CI_JOB_TOKEN`, `CI_PROJECT_PATH`, and `CI_SERVER_URL`, so no flags are needed for the current project.
+
+#### Using the Docker image (recommended)
+
+Use `kirbownz/combine-changelogs` directly as the job image — no installation step needed:
+
+```yaml
+generate-changelog:
+  image: kirbownz/combine-changelogs:latest
+  stage: docs
+  script:
+    # API releases only (CI_PROJECT_PATH and CI_JOB_TOKEN are injected automatically)
+    - combine-changelogs
+
+    # Merge a local file produced by "go-semantic-release --dry" with past API releases.
+    # Use this when the changelog is generated before the GitLab Release is published.
+    # - combine-changelogs -include CHANGELOG.md
+  artifacts:
+    paths:
+      - CHANGELOG.md
+```
+
+#### Using the install script
+
+Download the pre-built binary for the runner's architecture at job start:
 
 ```yaml
 generate-changelog:
@@ -143,12 +196,7 @@ generate-changelog:
     # Install latest release. Pin a version with: | sh -s -- v1.2.0
     - curl -fsSL https://gitlab.com/kirbo/combine-changelogs/-/raw/main/install.sh | sh
   script:
-    # API releases only (CI_PROJECT_PATH and CI_JOB_TOKEN are injected automatically)
     - combine-changelogs
-
-    # Merge a local file produced by "go-semantic-release --dry" with past API releases.
-    # Use this when the Docker image is built before the GitLab Release is created.
-    # - combine-changelogs -include CHANGELOG.md
   artifacts:
     paths:
       - CHANGELOG.md
@@ -160,9 +208,8 @@ generate-changelog:
 
 ```yaml
 generate-changelog:
+  image: kirbownz/combine-changelogs:latest
   stage: docs
-  before_script:
-    - curl -fsSL https://gitlab.com/kirbo/combine-changelogs/-/raw/main/install.sh | sh
   script:
     - combine-changelogs -include CHANGES.md
   artifacts:
