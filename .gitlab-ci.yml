@@ -2,9 +2,35 @@ stages:
   - semantic-release
   - build
   - release
+  - docker
+
+workflow:
+  rules:
+    # Run pipeline for merge requests
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    # Run pipeline for pushes to default branch
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    # Run pipeline for pushes to branches without open merge requests
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    # Run pipeline for all other branch pushes
+    - if: '$CI_COMMIT_BRANCH'
+    # Run pipeline for web/api triggers
+    - if: '$CI_PIPELINE_SOURCE == "web"'
 
 variables:
+  DOCKER_TLS_CERTDIR: ""
+  DOCKER_BUILDER_NAME: "builder-${CI_JOB_ID}"
+  DOCKERHUB_REPOSITORY: "kirbownz/${BINARY_NAME}"
+  IMAGE_NAME: ${DOCKERHUB_REPOSITORY}
   BINARY_NAME: combine-changelogs
+
+# Default configuration for all jobs
+default:
+  # Prefer private runner (macos tag), fallback to shared runners if unavailable
+  # Jobs without the macos tag will use shared runners automatically
+  tags:
+    - macos
 
 # Runs on every push to the default branch.
 # Analyzes conventional commits, determines the next semantic version,
@@ -15,27 +41,45 @@ variables:
 semantic-release:
   stage: semantic-release
   image:
-    name: ghcr.io/go-semantic-release/semantic-release:latest
+    name: registry.gitlab.com/go-semantic-release/semantic-release:latest
     entrypoint: [""]
-  script:
-    - semantic-release --provider gitlab --provider-opt "gitlab_baseurl=${CI_SERVER_URL}"
   rules:
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: '$CI_COMMIT_TAG == null'
+  artifacts:
+    paths:
+      - .version
+      - build.env
+      - CHANGELOG.md
+    expire_in: never
+  before_script:
+    - apk add --no-cache curl jq
+  script:
+    - semantic-release --provider gitlab --provider-opt "gitlab_baseurl=${CI_SERVER_URL}" --allow-no-changes --version-file --changelog CHANGELOG.md
+    # If no new release was created, fall back to the latest existing GitLab release.
+    - |
+      if [ ! -f .version ] || [ ! -f CHANGELOG.md ]; then
+        LATEST=$(curl -sf --header "JOB-TOKEN: ${CI_JOB_TOKEN}" "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/releases?per_page=1")
+        [ ! -f .version ]      && echo "${LATEST}" | jq -r '.[0].tag_name // "0.0.0" | ltrimstr("v")' > .version
+        [ ! -f CHANGELOG.md ]  && echo "${LATEST}" | jq -r '.[0].description // ""'                   > CHANGELOG.md
+      fi
+    - export VERSION=$(cat .version)
+    - echo "VERSION=${VERSION}" > build.env
+    - cat CHANGELOG.md
 
 # Reusable build template — cross-compiles for Linux.
 # Set GOARCH in the extending job.
 .build:
   stage: build
   image: golang:alpine
-  script:
-    - GOOS=linux go build -o ${BINARY_NAME}-linux-${GOARCH} .
   artifacts:
     paths:
       - ${BINARY_NAME}-linux-${GOARCH}
     # Only needs to survive long enough for the upload job to pick it up.
     expire_in: 1 hour
   rules:
-    - if: $CI_COMMIT_TAG
+    - if: '$CI_COMMIT_TAG == null'
+  script:
+    - GOOS=linux go build -o ${BINARY_NAME}-linux-${GOARCH} .
 
 build:amd64:
   extends: .build
@@ -57,6 +101,8 @@ upload-binaries:
       artifacts: true
     - job: build:arm64
       artifacts: true
+  rules:
+    - if: '$CI_COMMIT_TAG == null'
   before_script:
     - apk add --no-cache curl
   script:
@@ -78,5 +124,41 @@ upload-binaries:
           --data "{\"name\":\"${BINARY_NAME}-linux-${GOARCH}\",\"url\":\"${DOWNLOAD_URL}\",\"link_type\":\"package\"}" \
           "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/releases/${CI_COMMIT_TAG}/assets/links"
       done
+
+# Builds multi-platform Docker images (amd64 + arm64) and pushes them to Docker Hub.
+# Runs after upload-binaries so the binaries are available in the packages registry
+# for the install script to download during the Docker build.
+#
+# Requires DOCKERHUB_USERNAME and DOCKERHUB_PASSWORD CI/CD variables.
+build-and-push-docker:
+  stage: docker
+  image: docker:latest
+  variables:
+    DOCKER_HOST: "unix:///var/run/docker.sock"
+  needs:
+    - job: semantic-release
+      artifacts: true
+    - job: upload-binaries
+      artifacts: false
   rules:
-    - if: $CI_COMMIT_TAG
+    - if: '$CI_COMMIT_TAG == null'
+  before_script:
+    - export BUILDER_NAME="${DOCKER_BUILDER_NAME:-shared-ci-builder}"
+    - docker buildx inspect "${BUILDER_NAME}" >/dev/null 2>&1 || docker buildx create --name "${BUILDER_NAME}" --driver docker-container --use
+    - echo "${DOCKERHUB_PASSWORD}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin "${DOCKERHUB_REGISTRY}"
+    - echo "${DOCKERHUB_PASSWORD_READ}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin dhi.io
+  script:
+    - source build.env
+    - |
+      docker buildx build \
+        --builder "${BUILDER_NAME}" \
+        --platform linux/amd64,linux/arm64 \
+        --build-arg VERSION=${VERSION} \
+        --build-arg BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ') \
+        --build-arg VCS_REF=${CI_COMMIT_SHORT_SHA} \
+        --provenance=true \
+        --sbom=true \
+        -t ${DOCKERHUB_REGISTRY}/${DOCKERHUB_REPOSITORY}:latest \
+        -t ${DOCKERHUB_REGISTRY}/${DOCKERHUB_REPOSITORY}:${VERSION} \
+        --push \
+        -f docker/Dockerfile .
