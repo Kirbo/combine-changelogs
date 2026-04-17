@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -549,6 +550,186 @@ func TestLoadIncludes(t *testing.T) {
 		assertNoError(t, err)
 		if len(releases) != 2 {
 			t.Fatalf("expected 2 releases, got %d", len(releases))
+		}
+	})
+}
+
+// ── compileIgnoreRegexes ──────────────────────────────────────────────────────
+
+func TestCompileIgnoreRegexes(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty input returns empty slice, no error", func(t *testing.T) {
+		t.Parallel()
+		got, err := compileIgnoreRegexes(nil)
+		assertNoError(t, err)
+		if len(got) != 0 {
+			t.Errorf("expected empty slice, got %d entries", len(got))
+		}
+	})
+
+	t.Run("single valid pattern compiles", func(t *testing.T) {
+		t.Parallel()
+		got, err := compileIgnoreRegexes([]string{`-rc\.\d+`})
+		assertNoError(t, err)
+		if len(got) != 1 {
+			t.Fatalf("expected 1 compiled regex, got %d", len(got))
+		}
+		if !got[0].MatchString("v1.2.3-rc.1") {
+			t.Errorf(`compiled regex did not match "v1.2.3-rc.1"`)
+		}
+	})
+
+	t.Run("multiple valid patterns compile in order", func(t *testing.T) {
+		t.Parallel()
+		got, err := compileIgnoreRegexes([]string{`-rc\.\d+`, `-nightly`})
+		assertNoError(t, err)
+		if len(got) != 2 {
+			t.Fatalf("expected 2 compiled regexes, got %d", len(got))
+		}
+		if !got[0].MatchString("v1.0.0-rc.1") || got[0].MatchString("v1.0.0-nightly") {
+			t.Errorf("first regex behaves unexpectedly: %s", got[0].String())
+		}
+		if !got[1].MatchString("v1.0.0-nightly") || got[1].MatchString("v1.0.0-rc.1") {
+			t.Errorf("second regex behaves unexpectedly: %s", got[1].String())
+		}
+	})
+
+	t.Run("invalid pattern returns error echoing the bad input", func(t *testing.T) {
+		t.Parallel()
+		_, err := compileIgnoreRegexes([]string{`[`})
+		if err == nil {
+			t.Fatal("expected error for invalid regex, got nil")
+		}
+		if !strings.Contains(err.Error(), `-ignore-regex`) {
+			t.Errorf("error should mention flag name: %v", err)
+		}
+		if !strings.Contains(err.Error(), `[`) {
+			t.Errorf("error should echo the bad pattern: %v", err)
+		}
+	})
+
+	t.Run("first invalid pattern short-circuits", func(t *testing.T) {
+		t.Parallel()
+		_, err := compileIgnoreRegexes([]string{`[`, `also-invalid(`})
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+}
+
+// ── filterIgnoredReleases ────────────────────────────────────────────────────
+
+func TestFilterIgnoredReleases(t *testing.T) {
+	t.Parallel()
+
+	// mustCompile is a local helper to keep the test tables readable.
+	mustCompile := func(t *testing.T, patterns ...string) []*regexp.Regexp {
+		t.Helper()
+		compiled, err := compileIgnoreRegexes(patterns)
+		assertNoError(t, err)
+		return compiled
+	}
+
+	mk := func(name, tag string) sources.Release {
+		return sources.Release{Name: name, TagName: tag}
+	}
+
+	t.Run("no patterns returns input unchanged", func(t *testing.T) {
+		t.Parallel()
+		in := []sources.Release{mk("v1.0.0", "v1.0.0"), mk("v1.1.0", "v1.1.0")}
+		got := filterIgnoredReleases(in, nil)
+		if diff := releaseNames(got); len(diff) != 2 || diff[0] != "v1.0.0" || diff[1] != "v1.1.0" {
+			t.Errorf("unexpected output: %v", diff)
+		}
+	})
+
+	t.Run("pattern matches Name drops release", func(t *testing.T) {
+		t.Parallel()
+		in := []sources.Release{mk("v1.0.0-rc.1", "v1.0.0-rc.1"), mk("v1.0.0", "v1.0.0")}
+		got := filterIgnoredReleases(in, mustCompile(t, `-rc\.\d+`))
+		names := releaseNames(got)
+		if len(names) != 1 || names[0] != "v1.0.0" {
+			t.Errorf("expected only v1.0.0 to survive, got %v", names)
+		}
+	})
+
+	t.Run("pattern matches TagName when Name empty drops release", func(t *testing.T) {
+		t.Parallel()
+		in := []sources.Release{mk("", "v2.0.0-rc.7"), mk("", "v2.0.0")}
+		got := filterIgnoredReleases(in, mustCompile(t, `-rc\.\d+`))
+		if len(got) != 1 || got[0].TagName != "v2.0.0" {
+			t.Errorf("expected only v2.0.0 to survive, got %+v", got)
+		}
+	})
+
+	t.Run("no match keeps all releases", func(t *testing.T) {
+		t.Parallel()
+		in := []sources.Release{mk("v1.0.0", "v1.0.0"), mk("v1.1.0", "v1.1.0")}
+		got := filterIgnoredReleases(in, mustCompile(t, `-rc\.\d+`))
+		if len(got) != 2 {
+			t.Errorf("expected 2 survivors, got %d", len(got))
+		}
+	})
+
+	t.Run("multiple patterns union — any match drops", func(t *testing.T) {
+		t.Parallel()
+		in := []sources.Release{
+			mk("v1.0.0", "v1.0.0"),
+			mk("v1.0.0-rc.1", "v1.0.0-rc.1"),
+			mk("v1.0.0-nightly", "v1.0.0-nightly"),
+			mk("v1.1.0", "v1.1.0"),
+		}
+		got := filterIgnoredReleases(in, mustCompile(t, `-rc\.\d+`, `-nightly`))
+		names := releaseNames(got)
+		want := []string{"v1.0.0", "v1.1.0"}
+		if len(names) != len(want) {
+			t.Fatalf("expected %d survivors, got %d: %v", len(want), len(names), names)
+		}
+		for i, n := range names {
+			if n != want[i] {
+				t.Errorf("index %d: got %q, want %q", i, n, want[i])
+			}
+		}
+	})
+
+	t.Run("preserves order of survivors", func(t *testing.T) {
+		t.Parallel()
+		in := []sources.Release{
+			mk("alpha", "alpha"),
+			mk("skip-me", "skip-me"),
+			mk("beta", "beta"),
+			mk("skip-me-too", "skip-me-too"),
+			mk("gamma", "gamma"),
+		}
+		got := filterIgnoredReleases(in, mustCompile(t, `^skip`))
+		names := releaseNames(got)
+		want := []string{"alpha", "beta", "gamma"}
+		if len(names) != len(want) {
+			t.Fatalf("expected %d survivors, got %d: %v", len(want), len(names), names)
+		}
+		for i, n := range names {
+			if n != want[i] {
+				t.Errorf("index %d: got %q, want %q", i, n, want[i])
+			}
+		}
+	})
+
+	t.Run("partial match — does not require anchors", func(t *testing.T) {
+		t.Parallel()
+		in := []sources.Release{mk("v1.2.3-rc.1", "v1.2.3-rc.1"), mk("v1.2.3", "v1.2.3")}
+		got := filterIgnoredReleases(in, mustCompile(t, `-rc\.\d+`))
+		if len(got) != 1 || got[0].Name != "v1.2.3" {
+			t.Errorf("expected v1.2.3 to survive, got %+v", got)
+		}
+	})
+
+	t.Run("does not mutate input slice", func(t *testing.T) {
+		t.Parallel()
+		in := []sources.Release{mk("keep", "keep"), mk("drop-me", "drop-me")}
+		_ = filterIgnoredReleases(in, mustCompile(t, `^drop`))
+		if len(in) != 2 || in[0].Name != "keep" || in[1].Name != "drop-me" {
+			t.Errorf("input slice was mutated: %+v", in)
 		}
 	})
 }

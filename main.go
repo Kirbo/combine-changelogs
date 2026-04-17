@@ -204,6 +204,53 @@ func writeChangelog(releases []sources.Release, outputPath, commitBaseURL string
 	return nil
 }
 
+// compileIgnoreRegexes compiles a slice of regex pattern strings into
+// []*regexp.Regexp. It returns the first compile error encountered, wrapping
+// both the flag name and the offending pattern so the caller can surface a
+// useful error message. An empty input returns a nil slice and no error.
+func compileIgnoreRegexes(patterns []string) ([]*regexp.Regexp, error) {
+	if len(patterns) == 0 {
+		return nil, nil
+	}
+	compiled := make([]*regexp.Regexp, 0, len(patterns))
+	for _, p := range patterns {
+		re, err := regexp.Compile(p)
+		if err != nil {
+			return nil, fmt.Errorf("-ignore-regex %q: %w", p, err)
+		}
+		compiled = append(compiled, re)
+	}
+	return compiled, nil
+}
+
+// filterIgnoredReleases returns a new slice containing only the releases whose
+// effective name does not match any of the provided regexes. The effective name
+// is r.Name when non-empty, falling back to r.TagName. The input slice is not
+// modified. When regexes is nil or empty all releases are returned unchanged.
+func filterIgnoredReleases(releases []sources.Release, regexes []*regexp.Regexp) []sources.Release {
+	if len(regexes) == 0 {
+		return releases
+	}
+	kept := make([]sources.Release, 0, len(releases))
+	for _, r := range releases {
+		name := r.Name
+		if name == "" {
+			name = r.TagName
+		}
+		matched := false
+		for _, re := range regexes {
+			if re.MatchString(name) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			kept = append(kept, r)
+		}
+	}
+	return kept
+}
+
 // resolveSources validates the mode flag and determines which data sources to
 // activate. It returns fetchAPI=true when the platform API should be queried
 // and fetchLocal=true when -include sources should be loaded. An error is
@@ -261,9 +308,17 @@ func main() {
 		output      = flag.String("output", "CHANGELOG.md", "Output file path")
 		mode        = flag.String("mode", "mixed", `source mode: "api" (API only), "local" (-include sources only), "mixed" (both; default)`)
 		includes    stringSlice
+		ignoreRegex stringSlice
 	)
 	flag.Var(&includes, "include", "local file path or URL to merge into the output (repeatable)")
+	flag.Var(&ignoreRegex, "ignore-regex", "skip releases whose name matches this regex (repeatable; substring match)")
 	flag.Parse()
+
+	ignoreRes, err := compileIgnoreRegexes(ignoreRegex)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Error:", err)
+		os.Exit(1)
+	}
 
 	glSrc := sources.NewGitLabSourceFromEnv(*flagURL, *projectPath, *token)
 
@@ -291,6 +346,15 @@ func main() {
 			log.Fatalf("Error loading includes: %v", err)
 		}
 		allReleases = append(allReleases, releases...)
+	}
+
+	if len(ignoreRes) > 0 {
+		filtered := filterIgnoredReleases(allReleases, ignoreRes)
+		skipped := len(allReleases) - len(filtered)
+		if skipped > 0 {
+			log.Printf("Filtered %d release(s) matching -ignore-regex", skipped)
+		}
+		allReleases = filtered
 	}
 
 	sortReleases(allReleases)

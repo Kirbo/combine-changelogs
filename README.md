@@ -72,15 +72,17 @@ just install
 combine-changelogs [flags]
 
 Flags:
-  -project string   GitLab project path (e.g. group/project) or numeric ID
-                    (default: $CI_PROJECT_PATH)
-  -include string   Local file path or URL to merge into the output (repeatable)
-  -mode   string    Source mode: api, local, or mixed (default: mixed)
-  -url    string    GitLab instance URL
-                    (default: $CI_SERVER_URL, then https://gitlab.com)
-  -token  string    GitLab private token
-                    (default: $GITLAB_TOKEN, then $CI_JOB_TOKEN)
-  -output string    Output file path (default: CHANGELOG.md)
+  -project       string   GitLab project path (e.g. group/project) or numeric ID
+                          (default: $CI_PROJECT_PATH)
+  -include       string   Local file path or URL to merge into the output (repeatable)
+  -mode          string   Source mode: api, local, or mixed (default: mixed)
+  -url           string   GitLab instance URL
+                          (default: $CI_SERVER_URL, then https://gitlab.com)
+  -token         string   GitLab private token
+                          (default: $GITLAB_TOKEN, then $CI_JOB_TOKEN)
+  -output        string   Output file path (default: CHANGELOG.md)
+  -ignore-regex  string   Skip releases whose name matches this regex (repeatable;
+                          substring match — no anchors needed)
 ```
 
 At least one of `-project` or `-include` must be supplied.
@@ -136,6 +138,23 @@ combine-changelogs \
 
 ```bash
 combine-changelogs -project "mygroup/myrepo" -output "docs/CHANGES.md"
+```
+
+### Filtering releases by name
+
+Use `-ignore-regex` to drop releases whose name contains a match. The flag is repeatable — each pattern is tested independently and a release is dropped if any pattern matches. Matching is a substring (unanchored) match by default; add `^`/`$` to anchor.
+
+```bash
+# Drop pre-release candidates (v1.2.3-rc.1, 2.0.0-rc.2, …)
+combine-changelogs -project "mygroup/myrepo" -ignore-regex '-rc\.\d+'
+
+# Drop both release candidates and nightly builds
+combine-changelogs -project "mygroup/myrepo" \
+  -ignore-regex '-rc\.\d+' \
+  -ignore-regex '-nightly'
+
+# Drop anything that is not a stable semver (anchored negative pattern)
+combine-changelogs -project "mygroup/myrepo" -ignore-regex '[^0-9]\.'
 ```
 
 ### Merging local and remote changelog files
