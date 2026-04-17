@@ -4,8 +4,8 @@ description: Go 1.26 splits stdlib into its own module (module std) requiring go
 type: feedback
 ---
 
-Go 1.26 (via mise) moved the stdlib into its own module (`module std` in `$GOROOT/src/go.mod`) with external deps on `golang.org/x/crypto` and `golang.org/x/net`. When `~/go/pkg/mod/golang.org/x/` is not cached, all `go build`/`go test` commands fail with "package X is not in std" — even for purely stdlib packages like `flag` and `fmt`.
+Go 1.26 (via mise) moved stdlib to own module (`module std` in `$GOROOT/src/go.mod`) with external deps on `golang.org/x/crypto`, `golang.org/x/net`. When `~/go/pkg/mod/golang.org/x/` uncached, all `go build`/`go test` fail "package X is not in std" — even pure stdlib pkgs like `flag`, `fmt`.
 
-**Why:** proxy.golang.org is not in the default sandbox allowlist, so the first cold-cache run needs sandbox disabled.
+**Why:** proxy.golang.org not in default sandbox allowlist, so cold-cache run needs sandbox disabled.
 
-**How to apply:** When `go build`/`go test` fails with "is not in std" on a Go 1.26+ mise install, immediately retry with `dangerouslyDisableSandbox: true`. Once the x/ deps are cached, subsequent runs should work in-sandbox. The sandbox restriction that causes this is the missing `proxy.golang.org` network host in the allowlist.
+**How to apply:** `go build`/`go test` fails "is not in std" on Go 1.26+ mise install → retry `dangerouslyDisableSandbox: true`. Once x/ deps cached, subsequent runs work in-sandbox. Root cause: missing `proxy.golang.org` host in sandbox allowlist.
