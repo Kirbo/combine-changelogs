@@ -75,6 +75,8 @@ Flags:
   -project       string   GitLab project path (e.g. group/project) or numeric ID
                           (default: $CI_PROJECT_PATH)
   -include       string   Local file path or URL to merge into the output (repeatable)
+  -unreleased    string   Like -include, but stamp the section(s) as released "now" so they
+                          always sort newest — for not-yet-released notes (repeatable)
   -mode          string   Source mode: api, local, or mixed (default: mixed)
   -url           string   GitLab instance URL
                           (default: $CI_SERVER_URL, then https://gitlab.com)
@@ -85,7 +87,7 @@ Flags:
                           substring match — no anchors needed)
 ```
 
-At least one of `-project` or `-include` must be supplied.
+At least one of `-project`, `-include`, or `-unreleased` must be supplied.
 
 ### Source modes
 
@@ -179,6 +181,19 @@ combine-changelogs -project "mygroup/myrepo" \
 ```
 
 `-include` sources are expected to contain one or more sections delimited by markdown version headings. Both `go-semantic-release` (`## 1.2.3 (2024-01-15)`) and Keep a Changelog (`## [1.2.3] - 2024-01-15`) formats are recognised.
+
+### Pinning the unreleased section to the top (`-unreleased`)
+
+A not-yet-released changelog (e.g. the output of `git-cliff` for commits since the last tag) carries a heading with only a **date** — `## 2026.6.12 (2026-06-08)`. That date parses to **midnight**, so if a release was already published **earlier the same day** (with a real timestamp like 13:45), the date-sorted output would put that published release *above* your unreleased section. That's almost never what you want.
+
+`-unreleased` behaves exactly like `-include`, but stamps every section it loads with the **current time**, so it always sorts newest:
+
+```bash
+# git-cliff wrote the pending notes to UNRELEASED-CHANGELOG.md; keep it on top:
+combine-changelogs -project "mygroup/myrepo" -unreleased UNRELEASED-CHANGELOG.md
+```
+
+Use `-include` for historical/dated changelogs whose order must be preserved, and `-unreleased` for the single pending section that should always lead. The two can be combined.
 
 ### Inside a GitLab CI pipeline
 

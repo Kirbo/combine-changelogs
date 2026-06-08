@@ -554,6 +554,43 @@ func TestLoadIncludes(t *testing.T) {
 	})
 }
 
+// loadUnreleased: -unreleased sections are dated "now" so they always sort newest.
+func TestLoadUnreleased(t *testing.T) {
+	// Pin "now". Not parallel — mutates the nowFunc package var.
+	fixed := time.Date(2026, 6, 8, 15, 21, 0, 0, time.UTC)
+	orig := nowFunc
+	nowFunc = func() time.Time { return fixed }
+	defer func() { nowFunc = orig }()
+
+	t.Run("stamps now, ignoring the heading date", func(t *testing.T) {
+		path := writeTempChangelog(t, "## 2026.6.12 (2026-06-08)\n\n#### Feature\n\n* something (abcd1234)\n")
+		releases, err := loadUnreleased([]string{path})
+		assertNoError(t, err)
+		if len(releases) != 1 {
+			t.Fatalf(fmtExpected1, len(releases))
+		}
+		if !releases[0].ReleasedAt.Equal(fixed) {
+			t.Errorf("ReleasedAt: got %v; want %v (now), not the heading's midnight date", releases[0].ReleasedAt, fixed)
+		}
+		if releases[0].Name != "2026.6.12" {
+			t.Errorf(nameField+fmtGotWant, releases[0].Name, "2026.6.12")
+		}
+	})
+
+	t.Run("sorts above a same-day published release", func(t *testing.T) {
+		path := writeTempChangelog(t, "## 2026.6.12 (2026-06-08)\n\n* unreleased\n")
+		unrel, err := loadUnreleased([]string{path})
+		assertNoError(t, err)
+		// A release published earlier the SAME day (real timestamp) — would beat a midnight heading.
+		published := sources.Release{Name: "v2026.6.11", ReleasedAt: time.Date(2026, 6, 8, 13, 45, 2, 0, time.UTC)}
+		all := append([]sources.Release{published}, unrel...)
+		sortReleases(all)
+		if all[0].Name != "2026.6.12" {
+			t.Errorf("expected unreleased 2026.6.12 on top; got %q", all[0].Name)
+		}
+	})
+}
+
 // ── compileIgnoreRegexes ──────────────────────────────────────────────────────
 
 func TestCompileIgnoreRegexes(t *testing.T) {

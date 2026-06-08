@@ -34,6 +34,10 @@ var versionHeading = regexp.MustCompile(`^#{1,6}\s+v?\[?\d[\d.]*`)
 // version heading, e.g. "## 1.2.3 (2024-01-15)".
 var headerDate = regexp.MustCompile(`\((\d{4}-\d{2}-\d{2})\)`)
 
+// nowFunc returns the current time. It's a package var so tests can pin it; the
+// -unreleased loader uses it to stamp not-yet-released sections as "now".
+var nowFunc = time.Now
+
 // parseVersionHeading extracts the release name and date from a markdown
 // version heading line like "## 1.2.3 (2024-01-15)". Falls back to time.Now()
 // when no parseable date is present.
@@ -119,7 +123,9 @@ func fetchChangelogURL(rawURL string) ([]sources.Release, error) {
 // CreatedAt. This ensures file-based and API-based entries are interleaved
 // correctly after merging.
 func sortReleases(releases []sources.Release) {
-	sort.Slice(releases, func(i, j int) bool {
+	// Stable so equal timestamps (e.g. several -unreleased sections all stamped "now", or releases
+	// sharing a second) keep their input order instead of shuffling between runs.
+	sort.SliceStable(releases, func(i, j int) bool {
 		di := releases[i].ReleasedAt
 		if di.IsZero() {
 			di = releases[i].CreatedAt
@@ -277,6 +283,22 @@ func resolveSources(mode, project string, includes []string) (fetchAPI, fetchLoc
 
 // loadIncludes reads and merges releases from all -include sources. Each entry
 // may be a local file path or an http:// / https:// URL.
+// loadUnreleased loads -unreleased sources exactly like -include, then stamps every parsed section's
+// ReleasedAt with the current time. A not-yet-released changelog heading carries only a date, which
+// parses to midnight and would sort BELOW a release cut earlier the same day; stamping "now" keeps the
+// unreleased section on top where it belongs. -include stays date-preserving for historical merges.
+func loadUnreleased(paths []string) ([]sources.Release, error) {
+	releases, err := loadIncludes(paths)
+	if err != nil {
+		return nil, err
+	}
+	now := nowFunc()
+	for i := range releases {
+		releases[i].ReleasedAt = now
+	}
+	return releases, nil
+}
+
 func loadIncludes(paths []string) ([]sources.Release, error) {
 	var all []sources.Release
 	for _, path := range paths {
@@ -308,9 +330,11 @@ func main() {
 		output      = flag.String("output", "CHANGELOG.md", "Output file path")
 		mode        = flag.String("mode", "mixed", `source mode: "api" (API only), "local" (-include sources only), "mixed" (both; default)`)
 		includes    stringSlice
+		unreleased  stringSlice
 		ignoreRegex stringSlice
 	)
 	flag.Var(&includes, "include", "local file path or URL to merge into the output (repeatable)")
+	flag.Var(&unreleased, "unreleased", "like -include, but stamp the section(s) as released now so they always sort newest — for not-yet-released notes whose heading carries only a date (repeatable)")
 	flag.Var(&ignoreRegex, "ignore-regex", "skip releases whose name matches this regex (repeatable; substring match)")
 	flag.Parse()
 
@@ -322,7 +346,9 @@ func main() {
 
 	glSrc := sources.NewGitLabSourceFromEnv(*flagURL, *projectPath, *token)
 
-	fetchAPI, fetchLocal, err := resolveSources(*mode, glSrc.Project(), includes)
+	// -unreleased sources count as local sources for mode/validation purposes.
+	localSources := append(append([]string{}, includes...), unreleased...)
+	fetchAPI, fetchLocal, err := resolveSources(*mode, glSrc.Project(), localSources)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
@@ -346,6 +372,15 @@ func main() {
 			log.Fatalf("Error loading includes: %v", err)
 		}
 		allReleases = append(allReleases, releases...)
+
+		unrel, err := loadUnreleased(unreleased)
+		if err != nil {
+			log.Fatalf("Error loading unreleased: %v", err)
+		}
+		if len(unrel) > 0 {
+			log.Printf("Loaded %d unreleased section(s); dated as now to sort newest", len(unrel))
+			allReleases = append(allReleases, unrel...)
+		}
 	}
 
 	if len(ignoreRes) > 0 {
