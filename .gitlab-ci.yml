@@ -8,8 +8,9 @@ workflow:
   rules:
     # Run pipeline for merge requests
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
-    # Run pipeline for pushes to default branch
+    # Run pipeline for pushes to default branch — on the ref-protected Mac runner (see MAC_DOCKER)
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      variables: { MAC_DOCKER: macos-protected }
     # Run pipeline for pushes to branches without open merge requests
     - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
       when: never
@@ -19,7 +20,11 @@ workflow:
     - if: '$CI_PIPELINE_SOURCE == "web"'
 
 variables:
-  DOCKER_TLS_CERTDIR: ""
+  # The Mac Docker runner by trust (docs on the Mac Mini: ~/Documents/Claude/GitLab/BuildKit.md):
+  # `main` pipelines run on the ref-protected "Kirbo Mini Protected" (its own cache, protected-branch
+  # jobs only — the workflow rule above), every other pipeline on the shared "Kirbo Mini". Jobs name
+  # `$MAC_DOCKER`, never the tag itself.
+  MAC_DOCKER: "macos"
   DOCKER_BUILDER_NAME: "builder-${CI_JOB_ID}"
   DOCKERHUB_REPOSITORY: "kirbownz/${BINARY_NAME}"
   IMAGE_NAME: ${DOCKERHUB_REPOSITORY}
@@ -29,15 +34,14 @@ variables:
 
 # Default configuration for all jobs
 default:
-  # Prefer private runner (macos tag), fallback to shared runners if unavailable
-  # Jobs without the macos tag will use shared runners automatically
   tags:
-    - macos
+    - $MAC_DOCKER
 
 bump version:
   stage: init
   image:
-    name: registry.gitlab.com/go-semantic-release/semantic-release:latest
+    # go-semantic-release, pinned by digest (it runs with the release token); bump via /maintain.
+    name: registry.gitlab.com/go-semantic-release/semantic-release@sha256:43f2fd02c91254791bff745f23afc2953c43b0a107fa17b338e7ca81762e1c21
     entrypoint: [""]
   interruptible: true
   rules:
@@ -87,15 +91,18 @@ build:arm64:
     GOARCH: arm64
 
 # Builds multi-platform Docker images (amd64 + arm64) and pushes them to Docker Hub.
-# Runs after upload-binaries so the binaries are available in the packages registry
-# for the install script to download during the Docker build.
+# Uses the binaries from the build jobs (docker/Dockerfile COPYs combine-changelogs-linux-$TARGETARCH).
 #
-# Requires DOCKERHUB_USERNAME and DOCKERHUB_PASSWORD CI/CD variables.
+# Requires DOCKERHUB_USERNAME and DOCKERHUB_PASSWORD CI/CD variables (DOCKERHUB_PASSWORD is protected,
+# so the job runs on protected branches only — a branch pipeline could never push).
+#
+# No Docker socket: `docker buildx` talks to the Mac's protected BuildKit server over mutual TLS
+# (`--driver remote`; client certificate in the protected File variables BUILDKIT_PROTECTED_*).
+# `docker login` needs no daemon — it writes the job's ~/.docker/config.json, which buildx hands on.
 build-and-push-docker:
   stage: docker
-  image: docker:latest
-  variables:
-    DOCKER_HOST: "unix:///var/run/docker.sock"
+  # docker:29.9.2-cli (buildx 0.38.1), pinned by digest.
+  image: docker:29.9.2-cli@sha256:5e6baf67325a79f64ed3bed6863954d5e05d0f3d4e57cbdb14809346814bbfdb
   needs:
     - job: bump version
       artifacts: true
@@ -104,10 +111,11 @@ build-and-push-docker:
     - job: build:arm64
       artifacts: true
   rules:
-    - if: '$CI_COMMIT_TAG == null'
+    - if: '$CI_COMMIT_REF_PROTECTED == "true" && $CI_COMMIT_TAG == null'
   before_script:
-    - export BUILDER_NAME="${DOCKER_BUILDER_NAME:-shared-ci-builder}"
-    - docker buildx inspect "${BUILDER_NAME}" >/dev/null 2>&1 || docker buildx create --name "${BUILDER_NAME}" --driver docker-container --use
+    - export BUILDER_NAME="${DOCKER_BUILDER_NAME}"
+    - docker buildx create --name "${BUILDER_NAME}" --driver remote --driver-opt "cacert=${BUILDKIT_PROTECTED_CA},cert=${BUILDKIT_PROTECTED_CERT},key=${BUILDKIT_PROTECTED_KEY}" tcp://host.docker.internal:12340
+    - docker buildx inspect --bootstrap "${BUILDER_NAME}"
     - echo "${DOCKERHUB_PASSWORD}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin "${DOCKERHUB_REGISTRY}"
   script:
     - source build.env
@@ -124,6 +132,9 @@ build-and-push-docker:
         -t ${DOCKERHUB_REGISTRY}/${DOCKERHUB_REPOSITORY}:${VERSION} \
         --push \
         -f docker/Dockerfile .
+  after_script:
+    - docker buildx rm "${DOCKER_BUILDER_NAME}" || true
+    - docker logout "${DOCKERHUB_REGISTRY}" || true
 
 
 # Runs on every push to the default branch.
@@ -135,7 +146,8 @@ build-and-push-docker:
 semantic-release:
   stage: release
   image:
-    name: registry.gitlab.com/go-semantic-release/semantic-release:latest
+    # go-semantic-release, pinned by digest (it runs with the release token); bump via /maintain.
+    name: registry.gitlab.com/go-semantic-release/semantic-release@sha256:43f2fd02c91254791bff745f23afc2953c43b0a107fa17b338e7ca81762e1c21
     entrypoint: [""]
   rules:
     - if: '$CI_COMMIT_TAG == null'
@@ -147,7 +159,7 @@ semantic-release:
 # them as downloadable assets to the release that go-semantic-release created.
 upload-binaries:
   stage: release
-  image: alpine:latest
+  image: alpine:3.23@sha256:f3d55900449227ae9e237ede521e7b665d53a253b42065ba90b9db9275e198ad
   needs:
     - job: semantic-release
     - job: bump version
