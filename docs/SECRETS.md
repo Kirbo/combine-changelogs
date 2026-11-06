@@ -4,7 +4,7 @@ Only the release's Docker Hub push needs a secret: `build-and-push-docker` logs 
 
 Contributors need none of this. Building, testing and the GitLab release (`CI_JOB_TOKEN`) use no secrets.
 
-> **Status: wired, not set up yet.** `fnox.toml` holds placeholder recipients and no values. Until the maintainer runs the setup below, the Docker job falls back to the legacy GitLab variables `DOCKERHUB_USERNAME` / `DOCKERHUB_PASSWORD` (see [Migrating](#migrating-from-the-gitlab-variables)).
+> **Status: done (2026-11-07).** The Docker Hub credentials come only from `fnox.toml`. The publish profile was verified against Docker Hub before the legacy GitLab variables were deleted (decrypted with the publish identity, the registry granted `push,pull` on `kirbownz/combine-changelogs`); a job without its identity now fails closed.
 
 ## Who can read what
 
@@ -52,11 +52,10 @@ On another maintainer machine, only `scripts/secrets.sh setup` is needed.
 
 `ci/secrets.sh` `dockerhub_login` decides per job:
 
-1. The job has `FNOX_AGE_KEY_FILE` **and** this commit's `fnox.toml` holds `[profiles.publish.secrets]` → fnox (a decryption failure fails the job; it never falls back silently).
-2. Otherwise, if the legacy GitLab variables `DOCKERHUB_USERNAME` and `DOCKERHUB_PASSWORD` exist → those, with a log line saying fnox is not set up yet.
-3. Otherwise the job fails.
+1. The job has `FNOX_AGE_KEY_FILE` **and** this commit's `fnox.toml` holds `[profiles.publish.secrets]` → fnox (a decryption failure fails the job).
+2. Otherwise the job fails — there is no fallback (the legacy GitLab variables were deleted 2026-11-07).
 
-Once a release pipeline logged `secrets: loaded fnox profile(s): publish`, delete the GitLab variables `DOCKERHUB_PASSWORD`, `DOCKERHUB_USERNAME`, `DOCKERHUB_PASSWORD_READ` (no job uses it) and `DOCKERHUB_REGISTRY` (now `docker.io` in `.gitlab-ci.yml`).
+(Done 2026-11-07.) Once a release pipeline logged `secrets: loaded fnox profile(s): publish`, delete the GitLab variables `DOCKERHUB_PASSWORD`, `DOCKERHUB_USERNAME`, `DOCKERHUB_PASSWORD_READ` (no job uses it) and `DOCKERHUB_REGISTRY` (now `docker.io` in `.gitlab-ci.yml`).
 
 ## Commands
 

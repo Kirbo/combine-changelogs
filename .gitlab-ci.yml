@@ -169,9 +169,8 @@ build:arm64:
 #
 # Docker Hub credentials: environment release/publish gives the job its fnox tier identity
 # (FNOX_AGE_KEY_FILE, protected); ci/secrets.sh `dockerhub_login` decrypts the publish profile —
-# or, until fnox is set up, falls back to the legacy GitLab variables DOCKERHUB_USERNAME /
-# DOCKERHUB_PASSWORD (protected). docs/SECRETS.md. Protected refs only — a branch pipeline could
-# never push.
+# the only source (no plain GitLab variables). docs/SECRETS.md. Protected refs only — a branch
+# pipeline could never push.
 #
 # No Docker socket: `docker buildx` talks to the Mac's protected BuildKit server over mutual TLS
 # (`--driver remote`; client certificate in the protected File variables BUILDKIT_PROTECTED_*).

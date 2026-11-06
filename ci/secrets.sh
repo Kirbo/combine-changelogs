@@ -7,10 +7,8 @@
 # protected File-type variable to it: FNOX_AGE_KEY_FILE, that tier's age identity. fnox
 # decrypts with it.
 #
-# Migration fallback: until the maintainer has set fnox up (scripts/secrets.sh init-keys, then
-# the publish values), dockerhub_login uses the legacy GitLab variables DOCKERHUB_USERNAME /
-# DOCKERHUB_PASSWORD. fnox wins as soon as this commit's fnox.toml holds the publish profile
-# AND the job has the identity; after that the legacy variables can be deleted.
+# fnox is the only source (2026-11-07): the legacy GitLab variables are gone, so a job without
+# its identity, or a fnox.toml without the publish profile, fails here — closed.
 #
 # fnox and age come from mise.lock: ci/install-locked.sh installs the exact, checksummed
 # artifacts the lock names (the docker:cli image has no mise).
@@ -50,14 +48,11 @@ secrets_load() {
 # dockerhub_login — log in to $DOCKERHUB_REGISTRY with the Docker Hub push credentials: from
 # fnox (profile publish) once it is set up, else from the legacy GitLab variables.
 dockerhub_login() {
-  if fnox_ready; then
-    secrets_load publish
-  elif [ -n "${DOCKERHUB_USERNAME:-}" ] && [ -n "${DOCKERHUB_PASSWORD:-}" ]; then
-    echo "secrets: fnox is not set up for this repo yet — using the legacy GitLab variables DOCKERHUB_USERNAME / DOCKERHUB_PASSWORD (migration: docs/SECRETS.md)"
-  else
-    echo "secrets: no Docker Hub credentials — neither fnox (FNOX_AGE_KEY_FILE for environment release/publish + the publish profile in fnox.toml) nor the legacy GitLab variables DOCKERHUB_USERNAME / DOCKERHUB_PASSWORD" >&2
+  if ! fnox_ready; then
+    echo "secrets: no Docker Hub credentials — this job needs FNOX_AGE_KEY_FILE (environment release/publish) and the publish profile in fnox.toml (docs/SECRETS.md)" >&2
     exit 1
   fi
+  secrets_load publish
   printf '%s' "${DOCKERHUB_PASSWORD}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin "${DOCKERHUB_REGISTRY:-docker.io}"
   unset DOCKERHUB_PASSWORD
 }
