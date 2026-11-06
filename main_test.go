@@ -770,3 +770,34 @@ func TestFilterIgnoredReleases(t *testing.T) {
 		}
 	})
 }
+
+// ── versionString ─────────────────────────────────────────────────────────────
+
+func TestVersionString(t *testing.T) {
+	// Not parallel: it swaps the package-level version that -ldflags stamps.
+	tests := []struct {
+		name    string
+		version string
+		want    string
+	}{
+		{"stamped release", "1.5.0", "combine-changelogs 1.5.0"},
+		{"unstamped build", "dev", "combine-changelogs dev"},
+		{"empty stamp falls back to dev", "", "combine-changelogs dev"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			orig := version
+			t.Cleanup(func() { version = orig })
+			version = tc.version
+			if got := versionString(); got != tc.want {
+				t.Errorf(fmtGotWant, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestVersionDefaultsToDev(t *testing.T) {
+	if version != "dev" {
+		t.Errorf("unstamped version = %q; want %q (a test build carries no -ldflags)", version, "dev")
+	}
+}

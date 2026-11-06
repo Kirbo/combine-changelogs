@@ -22,6 +22,19 @@ type stringSlice []string
 func (s *stringSlice) String() string     { return strings.Join(*s, ", ") }
 func (s *stringSlice) Set(v string) error { *s = append(*s, v); return nil }
 
+// version is the release this binary was built as. Release builds stamp it with
+// -ldflags "-X main.version=<x.y.z>" (CI, `just build-release`); anything else
+// reports "dev".
+var version = "dev"
+
+// versionString is what -version prints: the binary name and its version.
+func versionString() string {
+	if version == "" {
+		return "combine-changelogs dev"
+	}
+	return "combine-changelogs " + version
+}
+
 func formatDate(t time.Time) string {
 	return t.Format("2006-01-02")
 }
@@ -336,7 +349,13 @@ func main() {
 	flag.Var(&includes, "include", "local file path or URL to merge into the output (repeatable)")
 	flag.Var(&unreleased, "unreleased", "like -include, but stamp the section(s) as released now so they always sort newest — for not-yet-released notes whose heading carries only a date (repeatable)")
 	flag.Var(&ignoreRegex, "ignore-regex", "skip releases whose name matches this regex (repeatable; substring match)")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(versionString())
+		return
+	}
 
 	ignoreRes, err := compileIgnoreRegexes(ignoreRegex)
 	if err != nil {
