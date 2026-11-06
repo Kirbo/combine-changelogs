@@ -1,2 +1,10 @@
 changes.md
 bin
+# mise tool installs and Go caches that CI keeps inside the project dir
+.mise/
+.go/
+# Build outputs (CI artifacts) and coverage
+combine-changelogs-linux-*
+coverage.out
+# Generated per maintainer machine by scripts/secrets.sh (points fnox at the keychain)
+fnox.local.toml
