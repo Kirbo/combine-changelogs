@@ -1,15 +1,20 @@
 stages:
   - init
+  - test
   - build
   - docker
   - release
 
 workflow:
+  # A new push cancels the interruptible jobs (checks, builds) of the previous pipeline on the same
+  # ref; the publishing jobs are not interruptible.
+  auto_cancel:
+    on_new_commit: interruptible
   rules:
     # Run pipeline for merge requests
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
-    # Run pipeline for pushes to default branch — on the ref-protected Mac runner (see MAC_DOCKER)
-    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    # Run pipeline for pushes to a protected branch (`main`) — on the ref-protected Mac runner (see MAC_DOCKER)
+    - if: '$CI_COMMIT_BRANCH && $CI_COMMIT_REF_PROTECTED == "true"'
       variables: { MAC_DOCKER: macos-protected }
     # Run pipeline for pushes to branches without open merge requests
     - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
@@ -21,75 +26,131 @@ workflow:
 
 variables:
   # The Mac Docker runner by trust (docs on the Mac Mini: ~/Documents/Claude/GitLab/BuildKit.md):
-  # `main` pipelines run on the ref-protected "Kirbo Mini Protected" (its own cache, protected-branch
-  # jobs only — the workflow rule above), every other pipeline on the shared "Kirbo Mini". Jobs name
-  # `$MAC_DOCKER`, never the tag itself.
+  # protected-branch pipelines run on the ref-protected "Kirbo Mini Protected" (its own cache,
+  # protected-branch jobs only — the workflow rule above), every other pipeline on the shared
+  # "Kirbo Mini". Jobs name `$MAC_DOCKER`, never the tag itself.
   MAC_DOCKER: "macos"
-  DOCKER_BUILDER_NAME: "builder-${CI_JOB_ID}"
-  DOCKERHUB_REPOSITORY: "kirbownz/${BINARY_NAME}"
-  IMAGE_NAME: ${DOCKERHUB_REPOSITORY}
   BINARY_NAME: combine-changelogs
-  GIT_DEPTH: "0"  # Tells git to fetch all the branches of the project, required by the analysis task
+  DOCKER_BUILDER_NAME: "builder-${CI_JOB_ID}"
+  DOCKERHUB_REGISTRY: docker.io
+  DOCKERHUB_REPOSITORY: "kirbownz/${BINARY_NAME}"
+  PACKAGE_REGISTRY_URL: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${BINARY_NAME}"
+  GIT_DEPTH: "0"  # git-cliff needs the full history and the tags
   GIT_STRATEGY: clone
+  CGO_ENABLED: "0"
+  # The toolchain comes from mise.toml, installed in LOCKED mode: only the exact, checksummed
+  # artifacts mise.lock names (no GitHub API calls). Tools and the Go build cache stay inside the
+  # project dir so they can be cached.
+  MISE_LOCKED: "1"
+  MISE_DATA_DIR: "$CI_PROJECT_DIR/.mise"
+  GOPATH: "$CI_PROJECT_DIR/.go"
+  GOCACHE: "$CI_PROJECT_DIR/.go/cache"
+  # Trust mise.toml without an interactive prompt (idempotent, unlike `mise trust`)
+  MISE_TRUSTED_CONFIG_PATHS: "$CI_PROJECT_DIR"
 
-# Default configuration for all jobs
+# Default for all jobs: the mise image (mise 2026.10.19, Debian), pinned by digest; each job
+# installs the tools it names in MISE_TOOLS from mise.lock. Bump via /maintain.
 default:
+  image:
+    name: ghcr.io/jdx/mise:2026.10.19-debian@sha256:9b8995abd457c975a4f5150b423f6569ee5a01960662ffa4c06c859867e59a21
+    entrypoint: [""]
   tags:
     - $MAC_DOCKER
+  interruptible: true
+  before_script:
+    - mise install --locked ${MISE_TOOLS}
+    - eval "$(mise env -s bash)"
+  # One cache per stage (each stage installs its own tools) and mise.lock. GitLab keeps protected
+  # and unprotected refs' caches apart, and the protected runner has its own cache folder, so a
+  # branch job can never feed what a release build restores.
+  cache:
+    key:
+      prefix: $CI_JOB_STAGE
+      files:
+        - mise.lock
+    paths:
+      - .mise
+      - .go/cache
 
+# Works out the next SemVer version from the Conventional Commits since the last tag, and that
+# release's notes (git-cliff: cliff.toml, scripts/next-version.sh). Writes VERSION and RELEASE to
+# build.env (dotenv: downstream jobs get them as variables) and the notes to CHANGELOG.md for the
+# release job. Nothing releasable since the last release (only `ci:`, `docs:`, `chore:` …) is not a
+# failure: RELEASE=false, VERSION empty — the builds still run as a check, but the docker and
+# release jobs publish nothing. `just next-version` previews the same locally. The version is only
+# ever stamped into the build (ldflags, image tags, release) — CI never commits it back.
 bump version:
   stage: init
-  image:
-    # go-semantic-release, pinned by digest (it runs with the release token); bump via /maintain.
-    name: registry.gitlab.com/go-semantic-release/semantic-release@sha256:43f2fd02c91254791bff745f23afc2953c43b0a107fa17b338e7ca81762e1c21
-    entrypoint: [""]
-  interruptible: true
+  variables:
+    MISE_TOOLS: git-cliff jq
   rules:
     - if: '$CI_COMMIT_TAG == null'
-  cache: []
   artifacts:
     paths:
-      - .version-unreleased
       - build.env
       - CHANGELOG.md
+    reports:
+      dotenv: build.env
     expire_in: never
-  before_script:
-    - git config --global --add safe.directory "$CI_PROJECT_DIR"
-    - git remote set-url origin "$CI_REPOSITORY_URL" || echo 'Not a git repository; skipping'
-    - git fetch --tags --force || true
-    - git fetch origin "$CI_DEFAULT_BRANCH" || true
   script:
-    # go-semantic-release exits 65 when the commits since the last release bump nothing (`ci:`,
-    # `docs:`, `chore:` …): that is not a failure — the builds still run as a compile check, but
-    # nothing is published (RELEASE=false: the docker, release and upload jobs exit early).
+    - git config --global --add safe.directory "$CI_PROJECT_DIR"
+    - git fetch --tags --force
+    # Any failure (e.g. git-cliff failing) fails the job instead of silently skipping the release.
+    - VERSION="$(scripts/next-version.sh --notes CHANGELOG.md)"
     - |
-      rc=0; semantic-release --version-file --changelog CHANGELOG.md --dry || rc=$?
-      if [ "$rc" = 65 ]; then
+      if [ -n "$VERSION" ]; then
+        printf 'VERSION=%s\nRELEASE=true\n' "$VERSION" > build.env
+        echo "Next release: v${VERSION}"
+        cat CHANGELOG.md
+      else
+        printf 'VERSION=\nRELEASE=false\n' > build.env
+        : > CHANGELOG.md
         echo "no releasable commits since the last release — building as a check, publishing nothing"
-        printf 'RELEASE=false\n' > build.env; : > .version-unreleased; : > CHANGELOG.md
-        exit 0
       fi
-      [ "$rc" = 0 ] || exit "$rc"
-    - export VERSION=$(cat .version-unreleased)
-    - echo "VERSION=${VERSION}" > build.env
-    - echo "RELEASE=true" >> build.env
-    - echo "sonar.projectVersion=${VERSION}" >> sonar-project.properties
-    - cat CHANGELOG.md
 
-# Reusable build template — cross-compiles for Linux.
-# Set GOARCH in the extending job.
+# gofmt, go vet, the tests (total coverage on the job) and shellcheck — `just check` locally.
+check:
+  stage: test
+  needs: []
+  variables:
+    MISE_TOOLS: go just shellcheck
+  rules:
+    - if: '$CI_COMMIT_TAG == null'
+  script:
+    - just check
+  coverage: '/total:\s+\(statements\)\s+(\d+\.\d+)%/'
+
+# mise.lock must name every pin in mise.toml for every platform: CI installs from it in locked mode,
+# so a stale lock would stop the pipeline. `--dry-run` installs nothing. Fix: `mise lock`, commit.
+mise.lock in sync:
+  stage: test
+  needs: []
+  rules:
+    - if: '$CI_COMMIT_TAG == null'
+  before_script: []
+  cache: []
+  script:
+    - mise install --locked --dry-run
+
+# Cross-compiles for Linux (GOARCH from the extending job), stamping the version from `bump version`
+# into the binary (`-version` prints it; "dev" when nothing is released).
 .build:
   stage: build
-  image: golang:alpine
+  needs:
+    - job: bump version
+      artifacts: true
+  variables:
+    MISE_TOOLS: go
   artifacts:
     paths:
       - ${BINARY_NAME}-linux-${GOARCH}
-    # Only needs to survive long enough for the upload job to pick it up.
-    expire_in: 1 hour
+    # Only needs to survive long enough for the docker and release jobs to pick it up.
+    expire_in: 1 day
   rules:
     - if: '$CI_COMMIT_TAG == null'
   script:
-    - GOOS=linux go build -o ${BINARY_NAME}-linux-${GOARCH} .
+    - GOOS=linux go build -trimpath -ldflags "-X main.version=${VERSION:-dev}" -o "${BINARY_NAME}-linux-${GOARCH}" .
+    - '[ "$GOARCH" != "$(go env GOHOSTARCH)" ] || "./${BINARY_NAME}-linux-${GOARCH}" -version'
 
 build:amd64:
   extends: .build
@@ -101,8 +162,10 @@ build:arm64:
   variables:
     GOARCH: arm64
 
-# Builds multi-platform Docker images (amd64 + arm64) and pushes them to Docker Hub.
-# Uses the binaries from the build jobs (docker/Dockerfile COPYs combine-changelogs-linux-$TARGETARCH).
+# Builds multi-platform Docker images (amd64 + arm64) and pushes them to Docker Hub as `:latest`
+# and `:<version>`. Uses the binaries from the build jobs (docker/Dockerfile COPYs
+# combine-changelogs-linux-$TARGETARCH). Writes the pushed image's digest to image.env for the
+# release job, so consumers can pin `kirbownz/combine-changelogs:<version>@sha256:…`.
 #
 # Requires DOCKERHUB_USERNAME and DOCKERHUB_PASSWORD CI/CD variables (DOCKERHUB_PASSWORD is protected,
 # so the job runs on protected branches only — a branch pipeline could never push).
@@ -112,8 +175,11 @@ build:arm64:
 # `docker login` needs no daemon — it writes the job's ~/.docker/config.json, which buildx hands on.
 build-and-push-docker:
   stage: docker
-  # docker:29.9.2-cli (buildx 0.38.1), pinned by digest.
+  # docker:29.9.2-cli (buildx 0.38.1), pinned by digest (it holds the push credentials).
   image: docker:29.9.2-cli@sha256:5e6baf67325a79f64ed3bed6863954d5e05d0f3d4e57cbdb14809346814bbfdb
+  interruptible: false
+  resource_group: publish
+  cache: []
   needs:
     - job: bump version
       artifacts: true
@@ -123,15 +189,20 @@ build-and-push-docker:
       artifacts: true
   rules:
     - if: '$CI_COMMIT_REF_PROTECTED == "true" && $CI_COMMIT_TAG == null'
+  artifacts:
+    paths:
+      - image.env
+    reports:
+      dotenv: image.env
+    expire_in: never
   before_script:
-    - . ./build.env
-    - '[ "${RELEASE:-true}" != false ] || { echo "no release — no image to publish"; exit 0; }'
+    - '[ "${RELEASE}" = true ] || { echo "no release — no image to publish"; echo "IMAGE_DIGEST=" > image.env; exit 0; }'
     - export BUILDER_NAME="${DOCKER_BUILDER_NAME}"
     - docker buildx create --name "${BUILDER_NAME}" --driver remote --driver-opt "cacert=${BUILDKIT_PROTECTED_CA},cert=${BUILDKIT_PROTECTED_CERT},key=${BUILDKIT_PROTECTED_KEY}" tcp://host.docker.internal:12340
     - docker buildx inspect --bootstrap "${BUILDER_NAME}"
-    - echo "${DOCKERHUB_PASSWORD}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin "${DOCKERHUB_REGISTRY}"
+    - printf '%s' "${DOCKERHUB_PASSWORD}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin "${DOCKERHUB_REGISTRY}"
   script:
-    - source build.env
+    - IMAGE="${DOCKERHUB_REGISTRY}/${DOCKERHUB_REPOSITORY}"
     - |
       docker buildx build \
         --builder "${BUILDER_NAME}" \
@@ -141,72 +212,71 @@ build-and-push-docker:
         --build-arg VCS_REF=${CI_COMMIT_SHORT_SHA} \
         --provenance=true \
         --sbom=true \
-        -t ${DOCKERHUB_REGISTRY}/${DOCKERHUB_REPOSITORY}:latest \
-        -t ${DOCKERHUB_REGISTRY}/${DOCKERHUB_REPOSITORY}:${VERSION} \
+        -t ${IMAGE}:latest \
+        -t ${IMAGE}:${VERSION} \
         --push \
         -f docker/Dockerfile .
+    - IMAGE_DIGEST="$(docker buildx imagetools inspect "${IMAGE}:${VERSION}" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+    - echo "${IMAGE_DIGEST}" | grep -Eqx 'sha256:[0-9a-f]{64}'
+    - echo "IMAGE_DIGEST=${IMAGE_DIGEST}" > image.env
+    - echo "Pushed ${IMAGE}:${VERSION} and :latest — pin it as ${DOCKERHUB_REPOSITORY}:${VERSION}@${IMAGE_DIGEST}"
   after_script:
     - docker buildx rm "${DOCKER_BUILDER_NAME}" || true
     - docker logout "${DOCKERHUB_REGISTRY}" || true
 
-
-# Runs on every push to the default branch.
-# Analyzes conventional commits, determines the next semantic version,
-# generates a changelog, and creates a GitLab release + tag.
-#
-# Requires a GITLAB_TOKEN CI/CD variable (Settings → CI/CD → Variables)
-# with `api` scope — CI_JOB_TOKEN does not have permission to push tags.
-semantic-release:
+# Uploads the binaries to the Generic Packages Registry, then creates the tag and the GitLab
+# release with the notes from `bump version`, the binaries and the pinned Docker image as asset
+# links. glab authenticates with CI_JOB_TOKEN (CI auto-login) — no other token: the Releases API
+# creates the tag from CI_COMMIT_SHA. The `release:` keyword isn't used because it cannot be
+# skipped when nothing is releasable.
+release:
   stage: release
   image:
-    # go-semantic-release, pinned by digest (it runs with the release token); bump via /maintain.
-    name: registry.gitlab.com/go-semantic-release/semantic-release@sha256:43f2fd02c91254791bff745f23afc2953c43b0a107fa17b338e7ca81762e1c21
+    name: registry.gitlab.com/gitlab-org/cli:v1.124.0@sha256:f6837b5aea075ca297281b554556d2fc4f8fb291ace6b48286790790dce622cd
     entrypoint: [""]
-  rules:
-    - if: '$CI_COMMIT_TAG == null'
-  script:
-    # Exit 65 = nothing to release (see `bump version`) — success, not failure.
-    - |
-      rc=0; semantic-release --provider gitlab --provider-opt "gitlab_baseurl=${CI_SERVER_URL}" || rc=$?
-      if [ "$rc" = 65 ]; then echo "no releasable commits — no release"; exit 0; fi
-      exit "$rc"
-
-
-# Uploads the compiled binaries to the Generic Packages Registry and attaches
-# them as downloadable assets to the release that go-semantic-release created.
-upload-binaries:
-  stage: release
-  image: alpine:3.23@sha256:f3d55900449227ae9e237ede521e7b665d53a253b42065ba90b9db9275e198ad
+  interruptible: false
+  # Serialize with other pipelines' releases, so two quick pushes can't publish one version twice.
+  resource_group: release
+  before_script: []
+  cache: []
+  variables:
+    GLAB_ENABLE_CI_AUTOLOGIN: "true"
   needs:
-    - job: semantic-release
     - job: bump version
       artifacts: true
     - job: build:amd64
       artifacts: true
     - job: build:arm64
       artifacts: true
+    - job: build-and-push-docker
+      artifacts: true
   rules:
-    - if: '$CI_COMMIT_TAG == null'
-  before_script:
-    - source build.env
-    - '[ "${RELEASE:-true}" != false ] || { echo "no release — nothing to upload"; exit 0; }'
-    - apk add --no-cache curl
+    - if: '$CI_COMMIT_REF_PROTECTED == "true" && $CI_COMMIT_TAG == null'
   script:
     - |
+      if [ "${RELEASE}" != true ]; then
+        echo "no releasable commits — no release"
+        exit 0
+      fi
+      apk add --no-cache curl >/dev/null
+
+      LINKS=""
       for GOARCH in amd64 arm64; do
-        DOWNLOAD_URL="${CI_PROJECT_URL}/-/packages/generic/${BINARY_NAME}/${VERSION}/${BINARY_NAME}-linux-${GOARCH}"
-
-        # Upload binary to the Generic Packages Registry
-        curl --fail --show-error \
+        NAME="${BINARY_NAME}-linux-${GOARCH}"
+        echo "Uploading ${NAME}..."
+        curl --fail --silent --show-error \
           --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
-          --upload-file "${BINARY_NAME}-linux-${GOARCH}" \
-          "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${BINARY_NAME}/${VERSION}/${BINARY_NAME}-linux-${GOARCH}"
-
-        # Attach the uploaded file as an asset link on the existing release
-        curl --fail --show-error \
-          --request POST \
-          --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
-          --header "Content-Type: application/json" \
-          --data "{\"name\":\"${BINARY_NAME}-linux-${GOARCH}\",\"url\":\"${DOWNLOAD_URL}\",\"link_type\":\"package\"}" \
-          "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/releases/v${VERSION}/assets/links"
+          --upload-file "${NAME}" \
+          "${PACKAGE_REGISTRY_URL}/${VERSION}/${NAME}" >/dev/null
+        LINKS="${LINKS:+${LINKS},}{\"name\":\"${NAME}\",\"url\":\"${PACKAGE_REGISTRY_URL}/${VERSION}/${NAME}\",\"link_type\":\"package\"}"
       done
+      IMAGE_REF="${DOCKERHUB_REPOSITORY}:${VERSION}@${IMAGE_DIGEST}"
+      LINKS="${LINKS},{\"name\":\"Docker image ${IMAGE_REF}\",\"url\":\"https://hub.docker.com/r/${DOCKERHUB_REPOSITORY}/tags?name=${VERSION}\",\"link_type\":\"image\"}"
+
+      glab release create "v${VERSION}" \
+        --repo "${CI_PROJECT_PATH}" \
+        --name "v${VERSION}" \
+        --ref "${CI_COMMIT_SHA}" \
+        --notes-file CHANGELOG.md \
+        --assets-links "[${LINKS}]"
+      echo "Released v${VERSION}; image ${IMAGE_REF}"

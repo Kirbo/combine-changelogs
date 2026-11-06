@@ -1,4 +1,5 @@
-# combine-changelogs Justfile
+# combine-changelogs Justfile — the tools come from mise.toml (`mise install`, then run `just` inside
+# the activated mise environment or as `mise exec -- just <recipe>`).
 
 binary := "combine-changelogs"
 bin_dir := "bin"
@@ -23,7 +24,7 @@ build-linux-arm64:
 # Build both Linux binaries
 build-linux: build-linux-amd64 build-linux-arm64
 
-# Build with version info baked in (pass VERSION=x.y.z)
+# Build the Linux binaries with the version baked in (just build-release x.y.z; -version prints it)
 build-release version="dev":
     GOOS=linux GOARCH=amd64 go build -ldflags "-X main.version={{version}}" -o {{bin_dir}}/{{binary}}-linux-amd64 .
     GOOS=linux GOARCH=arm64 go build -ldflags "-X main.version={{version}}" -o {{bin_dir}}/{{binary}}-linux-arm64 .
@@ -31,6 +32,35 @@ build-release version="dev":
 # Run go vet and check for issues
 lint:
     go vet ./...
+
+# Fail when a tracked Go file is not gofmt -s formatted (only tracked files: CI keeps the Go
+# toolchain under .mise/ inside the project dir)
+fmt-check:
+    test -z "$(gofmt -s -l $(git ls-files '*.go'))" || { gofmt -s -l $(git ls-files '*.go'); echo "run: gofmt -s -w ." >&2; exit 1; }
+
+# Run the tests, printing the total coverage (CI parses the `total:` line)
+test:
+    go test -coverprofile=coverage.out ./...
+    go tool cover -func=coverage.out | tail -1
+
+# Run the tests with the race detector (needs cgo and a C compiler)
+test-race:
+    CGO_ENABLED=1 go test -race ./...
+
+# Lint the shell scripts
+lint-shell:
+    shellcheck $(git ls-files '*.sh')
+
+# Check the module and the Go toolchain for known vulnerabilities
+vuln:
+    go run golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION} ./...
+
+# Everything CI checks: format, vet, tests, shell scripts
+check: fmt-check lint test lint-shell
+
+# Preview the next release: its notes on stderr, the version (empty if nothing to release) on stdout
+next-version:
+    scripts/next-version.sh --notes /dev/stderr
 
 # Remove built binaries
 clean:

@@ -295,6 +295,21 @@ func TestParseVersionHeading(t *testing.T) {
 
 // ── parseChangelogFile ────────────────────────────────────────────────────────
 
+// gitCliffNotes is what this repo's own cliff.toml renders (`git cliff --strip all`):
+// the go-semantic-release format, with a fenced BREAKING CHANGE block and #### type
+// subsections that must stay inside their version's section.
+const gitCliffNotes = "## 2.0.0 (2026-11-06)\n\n" +
+	"#### Breaking Changes\n\n" +
+	"* **cli:** drop the mixed default (0123abcd)\n" +
+	"```\nBREAKING CHANGE: -mode is required\n```\n\n" +
+	"#### Bug Fixes\n\n" +
+	"* sort releases without a date last (89abcdef)\n\n" +
+	"## 1.5.0 (2026-10-01)\n\n" +
+	"#### Feature\n\n" +
+	"* -version prints the version (fedcba98)\n\n" +
+	"#### CI\n\n" +
+	"* version releases with git-cliff (76543210)\n"
+
 func TestParseChangelogFile(t *testing.T) {
 	t.Parallel()
 
@@ -308,6 +323,7 @@ func TestParseChangelogFile(t *testing.T) {
 		{"empty file returns no releases", "", 0},
 		{"file with only preamble returns no releases", "# Changelog\n\nNothing yet.\n", 0},
 		{"go-semantic-release subsections counted as one", "## 1.2.3 (2024-01-15)\n\n### Features\n\n* feat: thing\n\n### Bug Fixes\n\n* fix: bug\n", 1},
+		{"git-cliff (cliff.toml) notes counted per version", gitCliffNotes, 2},
 	}
 	for _, c := range countCases {
 		t.Run(c.name, func(t *testing.T) {
@@ -337,6 +353,19 @@ func TestParseChangelogFile(t *testing.T) {
 		}
 		if releases[0].Name != "1.2.0" || releases[1].Name != "1.1.0" {
 			t.Errorf("wrong order: %v", releaseNames(releases))
+		}
+	})
+
+	t.Run("git-cliff notes keep their dates and whole sections", func(t *testing.T) {
+		t.Parallel()
+		releases := mustParseChangelog(t, gitCliffNotes)
+		if len(releases) != 2 {
+			t.Fatalf("expected 2 releases, got %d", len(releases))
+		}
+		assertRelease(t, releases[0], "2.0.0", "2.0.0", "2026-11-06", "BREAKING CHANGE: -mode is required")
+		assertRelease(t, releases[1], "1.5.0", "1.5.0", "2026-10-01", "-version prints the version")
+		if !strings.Contains(releases[0].Description, "#### Bug Fixes") {
+			t.Errorf("2.0.0 lost its Bug Fixes subsection:\n%s", releases[0].Description)
 		}
 	})
 
