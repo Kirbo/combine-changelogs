@@ -1,0 +1,30 @@
+# Secrets for maintainer work and GitLab CI (https://fnox.jdx.dev). Every value is age
+# CIPHERTEXT: change one with `scripts/secrets.sh set <profile> <NAME>`, never by hand.
+#
+# Recipients are PUBLIC keys. A provider encrypts to the maintainer plus only the CI tiers
+# named on it, so the provider a secret uses decides who can read it:
+#   maintainer   1Password "combine-changelogs fnox keys"; locally the OS keychain via the
+#                generated fnox.local.toml (`scripts/secrets.sh setup`)
+#   publish      GitLab File variable FNOX_AGE_KEY_FILE, environment release/publish
+#                (protected: only `main` pipelines get it)
+# No identity lives in this file. Post-quantum (age1pq1…) keys reach fnox through
+# age-plugin-pq, which ships with mise's age. docs/SECRETS.md has the design.
+#
+# NOT SET UP YET: the recipients below are placeholders until the maintainer runs
+# `scripts/secrets.sh init-keys` (docs/SECRETS.md § Setting it up). Until the publish profile
+# holds secrets, the Docker job logs in with the legacy GitLab variables (ci/secrets.sh).
+#
+# Secrets live only in profiles (one per job group); CI loads them with
+# `--no-defaults -P <profile>` (ci/secrets.sh).
+if_missing = "error"
+
+[providers.age_publish]  # Docker Hub push: build-and-push-docker
+type = "age"
+recipients = [
+  "age1placeholder", # maintainer
+  "age1placeholder", # publish
+]
+
+[profiles]
+
+[profiles.publish]

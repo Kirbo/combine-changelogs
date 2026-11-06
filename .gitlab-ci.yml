@@ -167,8 +167,11 @@ build:arm64:
 # combine-changelogs-linux-$TARGETARCH). Writes the pushed image's digest to image.env for the
 # release job, so consumers can pin `kirbownz/combine-changelogs:<version>@sha256:…`.
 #
-# Requires DOCKERHUB_USERNAME and DOCKERHUB_PASSWORD CI/CD variables (DOCKERHUB_PASSWORD is protected,
-# so the job runs on protected branches only — a branch pipeline could never push).
+# Docker Hub credentials: environment release/publish gives the job its fnox tier identity
+# (FNOX_AGE_KEY_FILE, protected); ci/secrets.sh `dockerhub_login` decrypts the publish profile —
+# or, until fnox is set up, falls back to the legacy GitLab variables DOCKERHUB_USERNAME /
+# DOCKERHUB_PASSWORD (protected). docs/SECRETS.md. Protected refs only — a branch pipeline could
+# never push.
 #
 # No Docker socket: `docker buildx` talks to the Mac's protected BuildKit server over mutual TLS
 # (`--driver remote`; client certificate in the protected File variables BUILDKIT_PROTECTED_*).
@@ -180,6 +183,9 @@ build-and-push-docker:
   interruptible: false
   resource_group: publish
   cache: []
+  environment:
+    name: release/publish
+    action: prepare
   needs:
     - job: bump version
       artifacts: true
@@ -200,7 +206,8 @@ build-and-push-docker:
     - export BUILDER_NAME="${DOCKER_BUILDER_NAME}"
     - docker buildx create --name "${BUILDER_NAME}" --driver remote --driver-opt "cacert=${BUILDKIT_PROTECTED_CA},cert=${BUILDKIT_PROTECTED_CERT},key=${BUILDKIT_PROTECTED_KEY}" tcp://host.docker.internal:12340
     - docker buildx inspect --bootstrap "${BUILDER_NAME}"
-    - printf '%s' "${DOCKERHUB_PASSWORD}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin "${DOCKERHUB_REGISTRY}"
+    - . ci/secrets.sh
+    - dockerhub_login
   script:
     - IMAGE="${DOCKERHUB_REGISTRY}/${DOCKERHUB_REPOSITORY}"
     - |
