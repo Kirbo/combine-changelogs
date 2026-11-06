@@ -2,15 +2,18 @@
 
 ## Project
 
-Go CLI. Combines GitLab project releases (REST API) + local/remote changelog files → single `CHANGELOG.md`, newest-first. Single module (`combine-changelogs`), two packages: `main` + `sources/`. **Stdlib only** — no third-party deps. Binary distributed via `install.sh` (GitLab Generic Packages Registry) + Docker Hub (`kirbownz/combine-changelogs`). GitLab CI cross-compiles Linux amd64/arm64, `go-semantic-release` drives version bumps + tags + release.
+Go CLI. Combines GitLab project releases (REST API) + local/remote changelog files → single `CHANGELOG.md`, newest-first. Single module (`combine-changelogs`), two packages: `main` + `sources/`. **Stdlib only** — no third-party deps. Binary distributed via `install.sh` (GitLab Generic Packages Registry) + Docker Hub (`kirbownz/combine-changelogs`). GitLab CI cross-compiles Linux amd64/arm64; `git-cliff` (`cliff.toml`, `scripts/next-version.sh`) computes the version + notes, CI stamps it into the build and creates tag + release (`CI_JOB_TOKEN`). Toolchain pinned in `mise.toml` + `mise.lock`; Docker Hub creds via fnox (`docs/SECRETS.md`).
 
 ## Commands
 
 | Command | What |
 |---|---|
+| `mise install` | Install the pinned toolchain (go, just, shellcheck, git-cliff, jq, fnox, age) |
+| `just check` | Everything CI checks: gofmt, vet, tests + coverage, shellcheck |
+| `just next-version` | Preview next release (version stdout, notes stderr) |
 | `just build` / `go build -o bin/combine-changelogs .` | Build host platform |
 | `just build-linux` | Cross-compile amd64 + arm64 Linux binaries → `bin/` |
-| `just build-release version=x.y.z` | Linux multi-arch build, `-ldflags "-X main.version=..."` |
+| `just build-release x.y.z` | Linux multi-arch build, `-ldflags "-X main.version=..."` (`-version` prints it) |
 | `go test ./...` | All tests (root + `sources/`) |
 | `go test -run <Regexp> ./...` | Filter by test name |
 | `go test -race ./...` | Race detector (concurrency changes) |
@@ -71,24 +74,24 @@ Flow: fetch (API and/or files) → append → `sortReleases` (`ReleasedAt`, fall
 
 ### Tooling
 
-- Go version in `go.mod` = source of truth. README, Docker base images, CI all track it.
-- Task runner: `just` (not `make`). Linter baseline: `go vet` via `just lint`.
-- Conventional Commits. Semver via `go-semantic-release` (CI pipeline).
-- **Version-bumping types** — only when change touches `*.go`, `go.mod`, `go.sum`, `docker/Dockerfile`, `install.sh`:
+- Toolchain = `mise.toml` (EXACT pins, never `latest`) + committed `mise.lock` (URL + sha256 for linux-arm64/x64, macos-arm64, linux-*-musl). Changed a pin → `mise lock`, commit lock. CI installs `--locked` (`MISE_LOCKED=1`). `go.mod` `go` line = minimum language version only.
+- Task runner: `just` (not `make`). Linter baseline: `go vet` via `just lint`; `just check` = CI gate.
+- Conventional Commits. Semver via `git-cliff` (`scripts/next-version.sh` gate + `git cliff --bumped-version`). CI never commits a version — it is stamped at build/publish time only.
+- **Version-bumping types** (the next-version.sh gate) — only when change touches `*.go`, `go.mod`, `go.sum`, `docker/Dockerfile`, `install.sh`:
   - `feat:` → minor
   - `fix:` → patch
-  - `chore(deps):` → patch (go.mod updates)
+  - `chore(deps):` → patch (Go toolchain / go.mod updates — changes the shipped binary)
   - `<type>!:` → major. `!` mandatory for breaking changes. `BREAKING CHANGE:` footer nice-to-have.
-- **Non-bumping types** — CI-only, docs, `.claude/`, `Justfile`, `.gitignore`, `.gitlab-ci.yml`: `ci:`, `docs:`, `refactor:`, `test:`, `style:`, `perf:`, `chore:` (without `(deps)`), `build:`.
+- **Non-bumping types** — CI-only, docs, `.claude/`, `Justfile`, `.gitignore`, `.gitlab-ci.yml`, `mise.*`, `cliff.toml`, scripts: `ci:`, `docs:`, `refactor:`, `test:`, `style:`, `perf:`, `chore:` (without `(deps)`), `build:`. Nothing releasable → pipeline green, no release.
+- Own `cliff.toml` renders the go-semantic-release format (`## 1.2.3 (YYYY-MM-DD)`, `#### <Type>` subsections) — the format this tool parses. Keep them in step (`TestParseChangelogFile` git-cliff case).
 - Never `git push` — leave to human.
 - Never `git checkout` / switch branches — commit on current branch.
 
 ### Sync
 
 - Docs, examples, config files sync with code.
-- **Go version**: `go.mod` `go X.Y[.Z]` directive canonical. Must match:
-  - `README.md` § Requirements
-  - `.gitlab-ci.yml` `golang:alpine` tag (pin explicitly if reproducibility required)
+- **Go version**: exact toolchain = `mise.toml` `go = "X.Y.Z"` (+ `mise lock`). `go.mod` `go X.Y[.Z]` = minimum language version, must match `README.md` § Requirements.
+- **CI images** pinned by digest (`tag@sha256:…`) in `.gitlab-ci.yml`: mise (default), `docker:*-cli` (Docker job), `gitlab-org/cli` (release). Jobs tag `$MAC_DOCKER` (workflow sets `macos-protected` on protected refs), never a tag name. Docker builds only via remote BuildKit — no docker.sock / privileged / dind.
 - **Binary name** (`combine-changelogs`) appears **five places** — rename touches all:
   - `Justfile` (`binary :=`)
   - `install.sh`
@@ -111,7 +114,7 @@ Flow: fetch (API and/or files) → append → `sortReleases` (`ReleasedAt`, fall
 - `sources.Source` = extension point. New platform → new file (e.g. `sources/github.go`), implement `FetchReleases() ([]Release, error)`, add constructor (`NewGitHubSource` / `NewGitHubSourceFromEnv`), wire into `main`.
 - `Release` struct JSON tags must stay compatible with GitLab REST (`tag_name`, `released_at`, etc.) — what `json.Unmarshal` binds against. Changes break API parsing.
 - Merging: everything through `sortReleases`. `ReleasedAt` primary, `CreatedAt` fallback. Newest-first output.
-- Markdown version heading regex (`versionHeading`) = sole section delimiter for included files. Both `go-semantic-release` (`## 1.2.3 (2024-01-15)`) and Keep a Changelog (`## [1.2.3] - 2024-01-15`) formats supported. Change regex → update both tests + README § Output format.
+- Markdown version heading regex (`versionHeading`) = sole section delimiter for included files. Both `go-semantic-release` / this repo's `cliff.toml` (`## 1.2.3 (2024-01-15)`) and Keep a Changelog (`## [1.2.3] - 2024-01-15`) formats supported. Change regex → update both tests + README § Output format.
 - Commit linkification (`linkifyCommits` + `commitRef`) requires 7–40 lowercase hex inside parens. Don't loosen — false-positive risk on hex colours / numeric strings. Empty `commitBaseURL` disables linkification (local-only mode).
 - Three source modes: `api` requires `-project`, `local` requires `-include`, `mixed` (default) uses whichever available. `resolveSources` = single validation authority — don't duplicate.
 

@@ -1,6 +1,6 @@
 ---
 name: "maintainer"
-description: "Use PROACTIVELY when Go toolchain or module graph needs attention — `go.mod` updates, `govulncheck` findings, Go version bump, Alpine/Docker base image bump, or `/maintain` invoked. Covers routine dep hygiene, security advisory response, fixing breakage from upgraded packages/toolchain.\\n<example>\\nuser: \"update deps\" / \"govulncheck shows CVE\" / \"bump to Go 1.26\"\\nassistant: launches maintainer agent for module audit, updates, breakage resolution\\n</example>"
+description: "Use PROACTIVELY when Go toolchain or module graph needs attention — `go.mod` updates, `govulncheck` findings, Go version bump, mise tool pins (`mise.toml`/`mise.lock`), git-cliff/fnox tooling, Alpine/Docker base image or CI image bump, or `/maintain` invoked. Covers routine dep hygiene, security advisory response, fixing breakage from upgraded packages/toolchain.\\n<example>\\nuser: \"update deps\" / \"govulncheck shows CVE\" / \"bump to Go 1.26\"\\nassistant: launches maintainer agent for module audit, updates, breakage resolution\\n</example>"
 model: sonnet
 color: blue
 memory: project
@@ -12,33 +12,49 @@ Maintain `combine-changelogs` — Go CLI, GitLab releases → `CHANGELOG.md`. Fo
 
 ## Core Responsibilities
 
-1. **Go toolchain updates**: Track Go major/minor. Coordinate bumps across `go.mod`, README, CI base image.
+1. **Toolchain (mise)**: `mise.toml` pins EXACT versions (never `latest`) of go, just, shellcheck, git-cliff, jq, fnox, age; `mise.lock` (committed) holds URL + sha256 per `lockfile_platforms` (linux-arm64, linux-x64, macos-arm64, linux-arm64-musl, linux-x64-musl — the musl rows feed `ci/install-locked.sh` in the Alpine docker job). Every bump: edit pin → `mise lock` → `mise install` → verify. **Release-age quarantine: never pin a version published < 1 day ago** (`mise ls-remote <tool> --json` → `created_at`; `minimum_release_age = "1d"` only filters resolved versions, not exact pins). `GOVULNCHECK_VERSION` in `[env]` too. GitHub API rate limit bites `mise lock` (60/h anonymous) — set `MISE_GITHUB_TOKEN` if available, else wait for the reset.
 2. **Module graph hygiene**: **stdlib-only** — `go.mod` no `require` beyond language version. Keep so unless user approves new dep.
 3. **Vulnerability remediation**: `govulncheck` (or equivalent) vs `go.sum`. Triage by severity + reachability. Fix via upgrade/patched version.
 4. **Breakage resolution**: Toolchain bump breaks `vet`/`test`/`build` → diagnose, adapt, verify pipeline.
-5. **Base image coordination**: Alpine version in `docker/Dockerfile`. `golang:alpine` pinned in `.gitlab-ci.yml` → coordinate there too.
+5. **Base image coordination**: Alpine version in `docker/Dockerfile` (runtime image only). CI builds with mise's Go — no `golang:*` image.
 6. **CI images + runner hardening** (`.gitlab-ci.yml`, a `ci:` commit — non-bumping):
-   - Digest-pinned job images — bump each to a release **at least 7 days old** and re-pin
+   - Digest-pinned job images (keep `tag@sha256:…`) — bump each to a release **at least 7 days old** and re-pin
      (`docker buildx imagetools inspect <image:tag> --format '{{json .Manifest.Digest}}'`):
-     `docker:<x.y.z>-cli@sha256:…` (`build-and-push-docker`; must ship the buildx plugin),
-     `registry.gitlab.com/go-semantic-release/semantic-release@sha256:…` (`bump version`,
-     `semantic-release` — it runs with the release token, so never a floating `:latest`),
-     `alpine:<x.y>@sha256:…` (`upload-binaries`).
+     `ghcr.io/jdx/mise:<yyyy.m.d>-debian@sha256:…` (default image: bump version, check, builds,
+     `mise.lock in sync`), `docker:<x.y.z>-cli@sha256:…` (`build-and-push-docker`; must ship the
+     buildx plugin; holds the push credentials), `registry.gitlab.com/gitlab-org/cli:<v>@sha256:…`
+     (`release`; glab with CI auto-login).
    - Runner routing (docs on the Mac Mini: `~/Documents/Claude/GitLab/BuildKit.md`): jobs use
-     `tags: [$MAC_DOCKER]` — `macos-protected` on `main` (the workflow rule), `macos` otherwise — never
+     `tags: [$MAC_DOCKER]` — `macos-protected` when `$CI_COMMIT_REF_PROTECTED == "true"` (the workflow rule), `macos` otherwise — never
      the tag itself. `build-and-push-docker` runs on protected refs only and builds through the
      protected BuildKit server (`--driver remote`, File variables `BUILDKIT_PROTECTED_CA/CERT/KEY`):
      never `DOCKER_HOST` / the Docker socket, `--driver docker-container` or Docker-in-Docker.
-   - Secrets are protected variables where they can push (`DOCKERHUB_PASSWORD`); list names only:
-     `glab api "projects/kirbo%2Fcombine-changelogs/variables" | jq -r '.[] | "\(.key) protected=\(.protected)"'`.
+   - Release (git-cliff): `bump version` runs `scripts/next-version.sh` → `build.env` dotenv
+     (`VERSION`, `RELEASE=true|false`). Nothing releasable = `RELEASE=false`, green pipeline, docker +
+     release jobs exit 0. `release` uses `CI_JOB_TOKEN` only (glab auto-login; Releases API creates the
+     tag) — no `GITLAB_TOKEN`. The docker job writes `IMAGE_DIGEST` (image.env) → release asset link
+     `kirbownz/combine-changelogs:<v>@sha256:…`. CI never commits a version.
+   - Secrets (fnox, `docs/SECRETS.md`): Docker Hub creds in `fnox.toml` profile `publish`, tier
+     identity `FNOX_AGE_KEY_FILE` (env scope `release/publish`, protected). `ci/secrets.sh
+     dockerhub_login` falls back to the legacy GitLab variables `DOCKERHUB_USERNAME`/`DOCKERHUB_PASSWORD`
+     until fnox is set up — check which path the last release logged; once fnox works, remind the user
+     to delete the legacy variables. Never call `op`; never create keys/variables — tell the user what
+     to run (`scripts/secrets.sh …`). List variable names only:
+     `glab api "projects/kirbo%2Fcombine-changelogs/variables" | jq -r '.[] | "\(.key) protected=\(.protected) scope=\(.environment_scope)"'`.
    - The BuildKit client certificate expires 2029-02-08 (1Password "Kirbo Mini BuildKit protected mTLS").
+7. **Release tooling**: `cliff.toml` must keep rendering the go-semantic-release format
+   (`## X.Y.Z (YYYY-MM-DD)`, `#### <Type>`) — the format this tool parses
+   (`TestParseChangelogFile` git-cliff case). After a git-cliff bump: `just next-version` and
+   `git cliff --strip all > /tmp/notes.md && go run . -mode local -include /tmp/notes.md -output /tmp/x.md`
+   still finds every released version.
 
 ## Operational Workflow
 
 Follow in order.
 
 1. **Survey state**:
-   - `cat go.mod` — current Go version + `require` lines.
+   - `cat go.mod mise.toml` — Go language version, tool pins, `require` lines.
+   - Newer tools: `mise outdated --bump` (then check each candidate's age, ≥ 1 day).
    - `go list -m -u all` — check newer direct + indirect deps (no-op today, run anyway).
    - `govulncheck ./...` if available — scan `go.sum`.
    - Check https://go.dev/doc/devel/release for latest stable Go release.
@@ -53,10 +69,9 @@ Follow in order.
    - New third-party dep? **Stop. Ask user first.** Policy = stdlib-only.
 
 3. **Apply updates**:
-   - **Go version bump** (`go.mod` `go X.Y.Z`) → update:
-     - `go.mod` — `go X.Y[.Z]` directive
-     - `README.md` § Requirements — `Go X.Y+`
-     - `.gitlab-ci.yml` — `golang:alpine` tag if pinned (e.g. `golang:1.25-alpine`). Current CI uses unpinned `golang:alpine` — pin explicitly on bump if user wants reproducibility.
+   - **Go toolchain bump** (`mise.toml` `go = "X.Y.Z"`) → `mise lock`, `mise install`, verify; commit `chore(deps): bump Go to X.Y.Z` (a patch release — the shipped binary changes).
+   - **Go language version** (`go.mod` `go X.Y[.Z]`) — only when the code needs newer language/stdlib features → update `README.md` § Requirements `Go X.Y+` too.
+   - **Other mise tools** (just, shellcheck, git-cliff, jq, fnox, age) → `mise lock`; commit `build:` (non-releasing).
    - **Alpine version bump** (`docker/Dockerfile` `ARG ALPINE_VERSION`) → update:
      - `docker/Dockerfile` — `ARG ALPINE_VERSION=X.Y`
      - No other locations reference Alpine version.
@@ -69,12 +84,13 @@ Follow in order.
 4. **Resolve breakage + Verify**:
    - Run CLAUDE.md § Verification pipeline: `gofmt -l .`, `go vet ./...`, `go build ./...`, `go test ./...`.
    - `go.mod`/`go.sum` changed → `go mod tidy` (no diff), `go mod verify` (clean).
-   - Go version changed → confirm all three sync locations agree (`go.mod`, `README.md`, `.gitlab-ci.yml`).
+   - Go version changed → `go.mod` and `README.md` agree; `mise.lock` names the new toolchain (`MISE_LOCKED=1 mise install --locked --dry-run`).
+   - `just check` (gofmt, vet, tests + coverage, shellcheck) and `glab ci lint` clean — zero warnings.
    - Any test/vet/build fail: diagnose root cause. Breaking API change → adapt. Toolchain regression → pin previous + report.
 
 5. **Commit**:
    - Conventional Commits.
-   - Go version bump → `chore(deps): bump Go to X.Y`. Triggers patch release per semantic-release.
+   - Go version bump → `chore(deps): bump Go to X.Y.Z`. Triggers a patch release (scripts/next-version.sh counts `chore(deps)`).
    - Dep add (rare) → `chore(deps): add <pkg> vX.Y.Z`.
    - Dep upgrade → `chore(deps): bump <pkg> to vX.Y.Z`.
    - Alpine bump → `chore(deps): bump Alpine to X.Y`.
@@ -117,9 +133,9 @@ Record:
 
 - Go release behaviors in this repo (stdlib API shifts touching our code)
 - Vuln advisories hit + fix
-- Version-sync locations (`go.mod`, `README.md`, `.gitlab-ci.yml`, `docker/Dockerfile`)
+- Version-sync locations (`mise.toml` + `mise.lock`, `go.mod`, `README.md`, `.gitlab-ci.yml` image digests, `docker/Dockerfile`)
 - Alpine / Docker base-image quirks
-- Semantic-release behavior for `chore(deps)` commits in GitLab CI
+- git-cliff / next-version.sh behavior (which commit types release)
 - Tooling quirks (when `go mod tidy` produces unexpected diff, `govulncheck` flags to scope scans)
 
 Gap in CLAUDE.md/rules on module/toolchain maintenance → suggest update (ask before writing).

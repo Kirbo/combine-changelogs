@@ -4,7 +4,7 @@ A CLI tool written in Go that combines releases from a GitLab project (via the A
 
 ## Requirements
 
-- [Go](https://go.dev/dl/) 1.21+
+- To build from source: [Go](https://go.dev/dl/) 1.25+ (`go.mod`), or [mise](https://mise.jdx.dev), which installs the exact toolchain CI and the releases use (`mise install`, see [Development](#development))
 - A GitLab account and (for private projects) a [personal access token](https://gitlab.com/-/user_settings/personal_access_tokens)
 
 ## Installation
@@ -30,6 +30,8 @@ INSTALL_DIR=~/.local/bin curl -fsSL https://gitlab.com/kirbo/combine-changelogs/
 ```bash
 docker pull kirbownz/combine-changelogs:latest
 ```
+
+`:latest` always follows the newest release; every release is also tagged `:<version>` (e.g. `:1.5.0`). For reproducible pipelines, pin a release by digest: each [GitLab release](https://gitlab.com/kirbo/combine-changelogs/-/releases) lists its image as `kirbownz/combine-changelogs:<version>@sha256:…`.
 
 Run it against a project (mounts the current directory so the output `CHANGELOG.md` lands on the host):
 
@@ -85,6 +87,7 @@ Flags:
   -output        string   Output file path (default: CHANGELOG.md)
   -ignore-regex  string   Skip releases whose name matches this regex (repeatable;
                           substring match — no anchors needed)
+  -version                Print the version and exit
 ```
 
 At least one of `-project`, `-include`, or `-unreleased` must be supplied.
@@ -201,7 +204,7 @@ GitLab automatically provides `CI_JOB_TOKEN`, `CI_PROJECT_PATH`, and `CI_SERVER_
 
 #### Using the Docker image (recommended)
 
-Use `kirbownz/combine-changelogs` directly as the job image — no installation step needed:
+Use `kirbownz/combine-changelogs` directly as the job image — no installation step needed (pin `:<version>@sha256:…` from the release page instead of `:latest` for a reproducible pipeline):
 
 ```yaml
 generate-changelog:
@@ -271,18 +274,18 @@ Token resolution order (first non-empty value wins):
 
 ## Output format
 
-The generated file follows the [Keep a Changelog](https://keepachangelog.com) convention:
+Every release becomes one `## <name> - (<YYYY-MM-DD>)` section, newest first, with its description (GitLab release notes or the included section's body) below it. The output is itself a valid `-include` source:
 
 ```markdown
 # Changelog
 
 All notable changes to this project will be documented in this file.
 
-## [v1.2.0] - 2024-03-15
+## v1.2.0 - (2024-03-15)
 
 Release description from GitLab...
 
-## [v1.1.0] - 2024-02-01
+## v1.1.0 - (2024-02-01)
 
 ...
 ```
@@ -294,10 +297,39 @@ If you have [just](https://github.com/casey/just) installed, the following helpe
 | Command | Description |
 |---|---|
 | `just build` | Build the binary |
+| `just build-release <x.y.z>` | Build the Linux binaries with the version baked in |
+| `just check` | Everything CI checks: `gofmt`, `go vet`, tests (with coverage), `shellcheck` |
 | `just lint` | Run `go vet` |
+| `just test` / `just test-race` | Tests with coverage / with the race detector |
+| `just vuln` | `govulncheck` against the module and the Go toolchain |
+| `just next-version` | Preview the next release's version and notes |
 | `just install` | Build and install to `/usr/local/bin` |
 | `just uninstall` | Remove from `/usr/local/bin` |
 | `just clean` | Remove the built binary |
 | `just run <project>` | Build (if needed) and generate changelog |
 | `just run-private <project>` | Same, using `$GITLAB_TOKEN` |
 | `just run-self-hosted <url> <project>` | Run against a self-hosted instance |
+
+## Development
+
+The toolchain (Go, just, shellcheck, git-cliff, jq, fnox, age) is pinned exactly in [`mise.toml`](mise.toml) and locked with URLs and checksums in `mise.lock`; CI installs from the lock in locked mode. `go.mod`'s `go` line is only the minimum language version.
+
+```bash
+mise install          # the pinned toolchain
+mise exec -- just check
+```
+
+After changing a pin in `mise.toml`: `mise lock` and commit `mise.lock` (CI's `mise.lock in sync` job fails otherwise).
+
+### Releases
+
+Every push to `main` runs the pipeline on the Mac runners (protected refs on the ref-protected runner). [git-cliff](https://git-cliff.org) ([`cliff.toml`](cliff.toml), [`scripts/next-version.sh`](scripts/next-version.sh)) works out the next version from the [Conventional Commits](https://www.conventionalcommits.org) since the last `v*` tag:
+
+| Commits since the last release | Release |
+|---|---|
+| a breaking change (`type!:` or a `BREAKING CHANGE:` footer) | major |
+| `feat:` | minor |
+| `fix:`, `chore(deps):` | patch |
+| only `ci:`, `docs:`, `chore:`, `build:`, `refactor:`, `perf:`, `test:`, `style:` | none — the pipeline still builds and passes, and those commits are listed in the next release's notes |
+
+A release pushes the multi-arch image (`:latest` and `:<version>`) to Docker Hub, uploads the Linux binaries to the Generic Packages Registry, and creates the tag and the GitLab release (with `CI_JOB_TOKEN`) whose notes git-cliff renders in the same `## <version> (<date>)` format this tool parses. The version is only stamped into the build (`-version`, image tags, release); CI never commits it back. Docker Hub credentials: [`docs/SECRETS.md`](docs/SECRETS.md).
