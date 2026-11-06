@@ -178,7 +178,7 @@ cmd_check() {
 
 cmd_setup() {
   need fnox age-plugin-pq
-  grep -q 'placeholder' "${FNOX_FILE}" && die "${FNOX_FILE} has no keys yet — run 'scripts/secrets.sh init-keys'"
+  grep -q 'age1placeholder' "${FNOX_FILE}" && die "${FNOX_FILE} has no keys yet — run 'scripts/secrets.sh init-keys'"
   op_signin
   cmd_refresh_local --create
   echo "Storing the maintainer identity in the OS keychain…"
@@ -206,7 +206,7 @@ cmd_sync_ci() {
 
 cmd_init_keys() {
   need fnox age-keygen age-plugin-pq jq
-  grep -q 'placeholder' "${FNOX_FILE}" || die "${FNOX_FILE} already has keys. If init-keys stopped early, finish with 'setup' and/or 'sync-ci'; to replace a key, use 'rotate'"
+  grep -q 'age1placeholder' "${FNOX_FILE}" || die "${FNOX_FILE} already has keys. If init-keys stopped early, finish with 'setup' and/or 'sync-ci'; to replace a key, use 'rotate'"
   op_signin
   if op_ item get "${OP_ITEM}" --vault "${OP_VAULT}" >/dev/null 2>&1; then
     die "1Password already has \"${OP_ITEM}\" — delete it or finish with 'setup' + 'sync-ci'"
