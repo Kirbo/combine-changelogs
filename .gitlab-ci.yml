@@ -186,7 +186,10 @@ build-and-push-docker:
   environment:
     name: release/publish
     action: prepare
+  # The checks gate publishing: with `needs`, a job does not otherwise wait for its earlier stages.
   needs:
+    - job: check
+    - job: mise.lock in sync
     - job: bump version
       artifacts: true
     - job: build:amd64
