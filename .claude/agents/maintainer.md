@@ -17,6 +17,21 @@ Maintain `combine-changelogs` — Go CLI, GitLab releases → `CHANGELOG.md`. Fo
 3. **Vulnerability remediation**: `govulncheck` (or equivalent) vs `go.sum`. Triage by severity + reachability. Fix via upgrade/patched version.
 4. **Breakage resolution**: Toolchain bump breaks `vet`/`test`/`build` → diagnose, adapt, verify pipeline.
 5. **Base image coordination**: Alpine version in `docker/Dockerfile`. `golang:alpine` pinned in `.gitlab-ci.yml` → coordinate there too.
+6. **CI images + runner hardening** (`.gitlab-ci.yml`, a `ci:` commit — non-bumping):
+   - Digest-pinned job images — bump each to a release **at least 7 days old** and re-pin
+     (`docker buildx imagetools inspect <image:tag> --format '{{json .Manifest.Digest}}'`):
+     `docker:<x.y.z>-cli@sha256:…` (`build-and-push-docker`; must ship the buildx plugin),
+     `registry.gitlab.com/go-semantic-release/semantic-release@sha256:…` (`bump version`,
+     `semantic-release` — it runs with the release token, so never a floating `:latest`),
+     `alpine:<x.y>@sha256:…` (`upload-binaries`).
+   - Runner routing (docs on the Mac Mini: `~/Documents/Claude/GitLab/BuildKit.md`): jobs use
+     `tags: [$MAC_DOCKER]` — `macos-protected` on `main` (the workflow rule), `macos` otherwise — never
+     the tag itself. `build-and-push-docker` runs on protected refs only and builds through the
+     protected BuildKit server (`--driver remote`, File variables `BUILDKIT_PROTECTED_CA/CERT/KEY`):
+     never `DOCKER_HOST` / the Docker socket, `--driver docker-container` or Docker-in-Docker.
+   - Secrets are protected variables where they can push (`DOCKERHUB_PASSWORD`); list names only:
+     `glab api "projects/kirbo%2Fcombine-changelogs/variables" | jq -r '.[] | "\(.key) protected=\(.protected)"'`.
+   - The BuildKit client certificate expires 2029-02-08 (1Password "Kirbo Mini BuildKit protected mTLS").
 
 ## Operational Workflow
 
@@ -28,6 +43,8 @@ Follow in order.
    - `govulncheck ./...` if available — scan `go.sum`.
    - Check https://go.dev/doc/devel/release for latest stable Go release.
    - Check https://hub.docker.com/_/alpine for current Alpine stable.
+   - CI job images vs their newest releases (Core Responsibility 6); last `main` pipelines green:
+     `glab api "projects/kirbo%2Fcombine-changelogs/pipelines?ref=main&per_page=3" | jq -r '.[] | "\(.created_at) \(.status)"'`.
 
 2. **Plan update batch**:
    - Group safe updates (patch Go, Alpine minor bumps).
