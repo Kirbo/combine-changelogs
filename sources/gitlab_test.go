@@ -95,6 +95,12 @@ func TestNewGitLabSourceFromEnv(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			// Start from a clean environment: inside a GitLab job the runner's own CI_* and
+			// token variables would otherwise leak into the cases that expect them unset
+			// (the code treats an empty value as unset).
+			for _, k := range []string{"CI_SERVER_URL", "CI_PROJECT_PATH", "GITLAB_TOKEN", "CI_JOB_TOKEN"} {
+				t.Setenv(k, "")
+			}
 			for k, v := range c.envVars {
 				t.Setenv(k, v)
 			}
